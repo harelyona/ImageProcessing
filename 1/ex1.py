@@ -45,7 +45,7 @@ def get_video_cumulative_histograms(video_frame: np.ndarray) -> np.ndarray:
 #     plt.imshow(video[frame])
 #     plt.show()
 
-def main(video_path, video_type):
+def main(video_path, video_type) -> tuple[int, int]:
     """
     Main entry point for ex1
     :param video_path: path to video file
@@ -55,5 +55,5 @@ def main(video_path, video_type):
     grayscale_video = get_grayscale_video(video_path)
     cumulative_histogram = get_video_cumulative_histograms(grayscale_video)
     frame_diffs = np.sum(np.abs(np.diff(cumulative_histogram, axis=0)), axis=1)
-    cut_frame = np.argmax(frame_diffs)
-    return int(cut_frame), int(cut_frame + 1)
+    cut_frame = int(np.argmax(frame_diffs))
+    return cut_frame, cut_frame + 1
