@@ -1,5 +1,6 @@
 import numpy as np
 import mediapy as mp
+import matplotlib.pyplot as plt
 
 RED_TO_GREY = 0.299
 GREEN_TO_GREY = 0.587
@@ -34,16 +35,16 @@ def get_video_cumulative_histograms(video_frame: np.ndarray) -> np.ndarray:
 
     return np.cumsum(histogram, axis=1)
 
-# def show_frame(video: np.ndarray, frame: np.ndarray) -> None:
-#     """
-#     Display a single frame from the video.
-#
-#     :param video: a numpy array of shape (num_frames, H, W, 3) representing the RGB video
-#     :param frame: an integer representing the frame number to display
-#     """
-#     plt.axis('off')
-#     plt.imshow(video[frame])
-#     plt.show()
+def show_frame(video: np.ndarray, frame: int) -> None:
+    """
+    Display a single frame from the video.
+
+    :param video: a numpy array of shape (num_frames, H, W, 3) representing the RGB video
+    :param frame: an integer representing the frame number to display
+    """
+    plt.axis('off')
+    plt.imshow(video[frame])
+    plt.show()
 
 def main(video_path, video_type) -> tuple[int, int]:
     """
@@ -57,3 +58,10 @@ def main(video_path, video_type) -> tuple[int, int]:
     frame_diffs = np.sum(np.abs(np.diff(cumulative_histogram, axis=0)), axis=1)
     cut_frame = int(np.argmax(frame_diffs))
     return cut_frame, cut_frame + 1
+
+
+video_path = r"input\video2_category1.mp4"
+video = mp.read_video(video_path)
+frames = main(video_path, 1)
+show_frame(video, frames[0])
+show_frame(video, frames[1])
