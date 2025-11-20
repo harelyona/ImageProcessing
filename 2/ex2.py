@@ -1,74 +1,131 @@
-import matplotlib.pyplot as plt
+import os
+
 import numpy as np
+from matplotlib import pyplot as plt
 from scipy.io import wavfile
 
-# --- 1. Define File Path ---
-file_path = "Task 1/Task1.wav"
 
-# --- 2. Read WAV File ---
-sample_rate, audio_signal = wavfile.read(file_path)
+def read_audio(file_path):
+    """
+    Reads a WAV file, handles stereo-to-mono conversion, and normalizes to float.
+    """
+    sample_rate, audio_signal = wavfile.read(file_path)
+    original_dtype = audio_signal.dtype
+    if audio_signal.ndim > 1:
+        audio_signal = audio_signal[:, 0]
+    if "int" in str(original_dtype):
+        max_val = np.iinfo(original_dtype).max
+        audio_signal = audio_signal.astype(np.float64) / max_val
+    else:
+        max_val = 1.0
 
-# Store original data type for saving later
-original_dtype = audio_signal.dtype
-
-# Handle stereo files by taking only the first channel
-if audio_signal.ndim > 1:
-    audio_signal = audio_signal[:, 0]
-
-# Normalize to floating point (-1.0 to 1.0) for processing
-# This is good practice to avoid overflow issues
-if "int" in str(original_dtype):
-    max_val = np.iinfo(original_dtype).max
-    audio_signal = audio_signal.astype(np.float64) / max_val
+    return sample_rate, audio_signal, original_dtype, max_val
 
 
-# --- 3. Calculate FFT ---
-fft_spectrum = np.fft.fft(audio_signal)
-n_samples = len(audio_signal)
-fft_frequencies = np.fft.fftfreq(n_samples, d=1 / sample_rate)
-fft_magnitude = np.abs(fft_spectrum)
-positive_freq_indices = np.where(fft_frequencies >= 0)
-frequencies_to_plot = fft_frequencies[positive_freq_indices]
-magnitude_to_plot = fft_magnitude[positive_freq_indices]
+def apply_watermark_fft(audio_signal, sample_rate, target_freq, boost_val):
+    """
+    Applies a frequency domain watermark by boosting a specific frequency.
+    """
+    n_samples = len(audio_signal)
+    fft_spectrum = np.fft.fft(audio_signal)
+    fft_frequencies = np.fft.fftfreq(n_samples, d=1 / sample_rate)
+    positive_idx = np.argmin(np.abs(fft_frequencies - target_freq))
+    negative_idx = np.argmin(np.abs(fft_frequencies - (-target_freq)))
+    fft_spectrum[positive_idx] = boost_val
+    fft_spectrum[negative_idx] = boost_val
+    new_audio_complex = np.fft.ifft(fft_spectrum)
+    return np.real(new_audio_complex)
 
-# --- 6. NEW: Modify Spectrum and Perform Inverse Transform ---
 
-# Make a copy to modify. This is important!
-modified_spectrum = np.copy(fft_spectrum)
+def save_audio(file_path, audio_signal, sample_rate, original_dtype, max_val):
+    """
+    Converts the audio back to its original format and saves it.
+    """
+    if "int" in str(original_dtype):
+        current_max = np.max(np.abs(audio_signal))
+        if current_max > 1.0:
+            audio_signal = audio_signal / current_max
+        audio_data_int = (audio_signal * max_val).astype(original_dtype)
+    else:
+        audio_data_int = audio_signal.astype(original_dtype)
 
-# --- Define watermark parameters ---
-target_frequency = 10000  # The frequency to boost (e.g., 20,000 Hz)
-# The magnitude of the complex number at the target frequency
-# We will set it to a high value to make it detectable
-boost_value = 50000
+    wavfile.write(file_path, sample_rate, audio_data_int)
+    print("Done.")
 
-# --- Find the index for the positive target frequency ---
-# We find the index of the frequency bin closest to our target
-positive_index = np.argmin(np.abs(fft_frequencies - target_frequency))
 
-# --- Find the index for the corresponding negative frequency ---
-# The FFT spectrum is symmetric. For a real signal,
-# S[k] must be the complex conjugate of S[-k].
-# np.fft.fftfreq handily provides negative freqs for the second half
-negative_index = np.argmin(np.abs(fft_frequencies - (-target_frequency)))
-# Set the magnitude at the positive and negative frequencies
-# We set both to the same complex value (with phase 0) for simplicity.
-# This ensures the complex conjugate property is maintained.
-modified_spectrum[positive_index] = boost_value
-modified_spectrum[negative_index] = boost_value  # For a real signal, this should be the conjugate.
-# Setting both to the same real value is a simple way
-# to add a real sine wave.
+def plot_wav_spectrum(file_path, save: bool = False):
+    """
+    Calculates and plots the FFT spectrum of a given WAV file.
+    Useful for visually identifying watermarks.
+    """
+    fs, data, _, _ = read_audio(file_path)
+    n_samples = len(data)
+    fft_spectrum = np.fft.fft(data)
+    fft_frequencies = np.fft.fftfreq(n_samples, d=1 / fs)
+    positive_indices = np.where(fft_frequencies >= 0)
+    frequencies = fft_frequencies[positive_indices]
+    magnitudes = np.abs(fft_spectrum)[positive_indices]
+    plt.figure(figsize=(12, 5))
+    plt.plot(frequencies, magnitudes)
+    file_name = os.path.basename(file_path)
+    plt.title(f"Frequency Spectrum: {file_name}")
+    plt.xlabel("Frequency (Hz)")
+    plt.ylabel("Magnitude")
+    plt.grid(True, alpha=0.3)
+    if save:
+        plt.savefig(f"plots{os.sep}spectrum {file_name}.png")
+    plt.show()
 
-# --- Perform Inverse FFT ---
-# np.fft.ifft() converts the modified spectrum back to the time domain
-new_audio_signal_complex = np.fft.ifft(modified_spectrum)
-new_audio_signal = np.real(new_audio_signal_complex)
-if "int" in str(original_dtype):
-    max_new_val = np.max(np.abs(new_audio_signal))
-    if max_new_val > 1.0:
-        new_audio_signal = new_audio_signal / max_new_val
-    new_audio_signal_int = (new_audio_signal * max_val).astype(original_dtype)
-else:
-    new_audio_signal_int = new_audio_signal.astype(original_dtype)
-output_file_path = "Task1_watermarked.wav"
-wavfile.write(output_file_path, sample_rate, new_audio_signal_int)
+
+def plot_spectrogram(file_path, save: bool = False):
+    """
+    Plots the spectrogram and detects the dominant high-frequency watermark.
+    """
+    sample_rate, audio_signal = wavfile.read(file_path)
+    if "int" in str(audio_signal.dtype):
+        audio_signal = audio_signal.astype(np.float64)
+    plt.figure(figsize=(12, 6))
+    Pxx, freqs, bins, im = plt.specgram(audio_signal, NFFT=1024, Fs=sample_rate, noverlap=512, cmap='inferno')
+    file_name = os.path.basename(file_path)
+    plt.title(f"Spectrogram: {file_name}")
+    plt.ylabel('Frequency (Hz)')
+    plt.xlabel('Time (Seconds)')
+    cbar = plt.colorbar(im)
+    cbar.set_label('Intensity (dB)')
+    plt.axvline(x=5, color="black", linestyle='--', alpha=0.5)
+    plt.axvline(x=10, color="black", linestyle='--', alpha=0.5)
+    plt.axvline(x=15, color="black", linestyle='--', alpha=0.5)
+    plt.axvline(x=20, color="black", linestyle='--', alpha=0.5)
+    plt.axvline(x=25, color="black", linestyle='--', alpha=0.5)
+    plt.axvline(x=30, color="black", linestyle='--', alpha=0.5)
+    plt.axvline(x=35, color="black", linestyle='--', alpha=0.5)
+    plt.legend(loc='upper right')
+
+    if save:
+        if not os.path.exists("plots"):
+            os.makedirs("plots")
+        plt.savefig(f"plots{os.sep}spectrogram_{file_name}.png")
+
+    plt.show()
+
+
+TASK1_FOLDER = "Task 1" + os.path.sep
+TASK2_FOLDER = "Task 2" + os.path.sep
+TASK3_FOLDER = "Task 3" + os.path.sep
+
+if __name__ == "__main__":
+    # 1. Configuration
+
+    # bad_audio = apply_watermark_fft(data, fs, target_freq=1000, boost_val=50000)
+    # save_audio("Task1_BadWatermark.wav", bad_audio, fs, dtype, max_v)
+    # good_audio = apply_watermark_fft(data, fs, target_freq=30000, boost_val=70000)
+    # save_audio("Task1_GoodWatermark.wav", good_audio, fs, dtype, max_v)
+    # folder = TASK3_FOLDER
+    # for file in os.listdir(folder):
+    #     plot_spectrogram(folder + file, False)
+    sample_rate, audio_signal, original_dtype, max_val = read_audio(TASK1_FOLDER + "task1.wav")
+    watermarked_audio = apply_watermark_fft(audio_signal, sample_rate, target_freq=20000, boost_val=70000)
+
+
+
+
