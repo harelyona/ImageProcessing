@@ -164,13 +164,15 @@ def create_hybrid_image(im_far, im_close, kernel_size, hybrid_factor=1.5):
 
     return np.clip(hybrid, 0, 1)
 
-def show_image(img):
+def show_image(img, save_path=None):
     plt.figure()
     plt.imshow(img, cmap='gray')
     plt.axis('off')
+    if save_path:
+        plt.savefig(save_path)
     plt.show()
 
-def main_blend(im1_path: str, im2_path: str):
+def main_blend(im1_path: str, im2_path: str, output_path: str=None):
     right_img = plt.imread(im1_path)
     left_img = plt.imread(im2_path)
     number_of_levels = 10
@@ -178,16 +180,20 @@ def main_blend(im1_path: str, im2_path: str):
     mask = np.zeros((right_img.shape[0], right_img.shape[1]))
     mask[:, :mask.shape[1] // 2] = 1.0
     blended_image = image_blending(left_img, right_img, mask, number_of_levels, filter_size)
-    show_image(blended_image)
+    show_image(blended_image, output_path)
+    show_image(mask, "mask.png")
 
-def main_hybrid(im1_path: str, im2_path: str):
+def main_hybrid(im1_path: str, im2_path: str, output_path: str=None):
     far_image = rgb2gray(plt.imread(im1_path))
     close_image = rgb2gray(plt.imread(im2_path))
     kernel_size = 50
     hybrid_image = create_hybrid_image(far_image, close_image, kernel_size)
-    show_image(hybrid_image)
+    show_image(hybrid_image, output_path)
+    show_image(close_image, "close.png")
+    show_image(far_image, "far_image.png")
 
 
 if __name__ == "__main__":
-    main_blend("right.png", "left.png")
-    main_hybrid("dragon.png", "mouse.png")
+    main_blend("right.png", "left.png", "blended.png")
+
+    main_hybrid("dragon.png", "mouse.png", "hybrid.png")
