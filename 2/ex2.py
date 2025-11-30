@@ -68,9 +68,9 @@ def plot_wav_spectrum(file_path, save: bool = False):
     plt.figure(figsize=(12, 5))
     plt.plot(frequencies, magnitudes)
     file_name = os.path.basename(file_path)
-    plt.title(f"Frequency Spectrum: {file_name}")
+    plt.title(f"Frequency Spectrum after watermarking at 21kHz")
     plt.xlabel("Frequency (Hz)")
-    plt.ylabel("Magnitude")
+    plt.ylabel("Magnitude (a.u.)")
     plt.grid(True, alpha=0.3)
     if save:
         plt.savefig(f"plots{os.sep}spectrum {file_name}.png")
@@ -87,25 +87,23 @@ def plot_spectrogram(file_path, save: bool = False):
     plt.figure(figsize=(12, 6))
     Pxx, freqs, bins, im = plt.specgram(audio_signal, NFFT=1024, Fs=sample_rate, noverlap=512, cmap='inferno')
     file_name = os.path.basename(file_path)
-    plt.title(f"Spectrogram: {file_name}")
+    plt.title(f"Spectrogram of second file")
     plt.ylabel('Frequency (Hz)')
     plt.xlabel('Time (Seconds)')
     cbar = plt.colorbar(im)
     cbar.set_label('Intensity (dB)')
-    plt.axvline(x=5, color="black", linestyle='--', alpha=0.5)
-    plt.axvline(x=10, color="black", linestyle='--', alpha=0.5)
-    plt.axvline(x=15, color="black", linestyle='--', alpha=0.5)
-    plt.axvline(x=20, color="black", linestyle='--', alpha=0.5)
-    plt.axvline(x=25, color="black", linestyle='--', alpha=0.5)
-    plt.axvline(x=30, color="black", linestyle='--', alpha=0.5)
-    plt.axvline(x=35, color="black", linestyle='--', alpha=0.5)
-    plt.legend(loc='upper right')
+    # plt.axvline(x=5, color="black", linestyle='--', alpha=0.5)
+    # plt.axvline(x=10, color="black", linestyle='--', alpha=0.5)
+    # plt.axvline(x=15, color="black", linestyle='--', alpha=0.5)
+    # plt.axvline(x=20, color="black", linestyle='--', alpha=0.5)
+    # plt.axvline(x=25, color="black", linestyle='--', alpha=0.5)
+    # plt.axvline(x=30, color="black", linestyle='--', alpha=0.5)
+    # plt.axvline(x=35, color="black", linestyle='--', alpha=0.5)
 
     if save:
         if not os.path.exists("plots"):
             os.makedirs("plots")
         plt.savefig(f"plots{os.sep}spectrogram_{file_name}.png")
-
     plt.show()
 
 
@@ -114,17 +112,10 @@ TASK2_FOLDER = "Task 2" + os.path.sep
 TASK3_FOLDER = "Task 3" + os.path.sep
 
 if __name__ == "__main__":
-    # 1. Configuration
+    folder = TASK3_FOLDER
+    for file in os.listdir(TASK3_FOLDER):
+        plot_spectrogram(folder + file)
 
-    # bad_audio = apply_watermark_fft(data, fs, target_freq=1000, boost_val=50000)
-    # save_audio("Task1_BadWatermark.wav", bad_audio, fs, dtype, max_v)
-    # good_audio = apply_watermark_fft(data, fs, target_freq=30000, boost_val=70000)
-    # save_audio("Task1_GoodWatermark.wav", good_audio, fs, dtype, max_v)
-    # folder = TASK3_FOLDER
-    # for file in os.listdir(folder):
-    #     plot_spectrogram(folder + file, False)
-    sample_rate, audio_signal, original_dtype, max_val = read_audio(TASK1_FOLDER + "task1.wav")
-    watermarked_audio = apply_watermark_fft(audio_signal, sample_rate, target_freq=20000, boost_val=70000)
 
 
 
