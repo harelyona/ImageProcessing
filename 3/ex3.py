@@ -1,7 +1,10 @@
+from typing import List
+
 import numpy as np
 from scipy.signal import convolve2d
 import matplotlib.pyplot as plt
 from skimage.color import rgb2gray
+from skimage.transform import resize
 
 
 def generate_gaussian_kernel(kernel_size):
@@ -145,7 +148,7 @@ def image_blending(im1, im2, mask, max_levels, filter_size):
     return np.clip(im_blended, 0, 1)
 
 
-def create_hybrid_image(im_far, im_close, kernel_size, hybrid_factor=1.5):
+def  create_hybrid_image(im_far, im_close, kernel_size, hybrid_factor=1.5):
     # 1. Low Pass (התמונה הרחוקה - הדרקון)
     kernel_row = generate_gaussian_kernel(kernel_size)
     kernel_col = kernel_row.T
@@ -160,7 +163,7 @@ def create_hybrid_image(im_far, im_close, kernel_size, hybrid_factor=1.5):
 
     # --- התיקון: הגברת התדרים הגבוהים ---
     # נכפיל את הפרטים בפקטור (למשל 1.5 או 2.0) כדי שיהיו ברורים יותר מקרוב
-    hybrid = low_freq + (high_freq * hybrid_factor)
+    hybrid = low_freq + high_freq
 
     return np.clip(hybrid, 0, 1)
 
@@ -172,28 +175,132 @@ def show_image(img, save_path=None):
         plt.savefig(save_path)
     plt.show()
 
-def main_blend(im1_path: str, im2_path: str, output_path: str=None):
+def add_sub_figure(img, ax):
+    ax.imshow(img, cmap='gray')
+    ax.axis('off')
+
+
+def get_magnitude_spectrum(img):
+    """
+    Computes the log-magnitude spectrum of an image using 2D DFT.
+    """
+    # 1. Convert to grayscale if needed (Fourier is usually done on intensity)
+    if img.ndim == 3:
+        if img.shape[-1] == 4:
+            img = img[:, :, :3]
+        img = rgb2gray(img)
+
+    # 2. Compute the 2D Fourier Transform
+    f = np.fft.fft2(img)
+
+    # 3. Shift the zero-frequency component to the center of the spectrum
+    fshift = np.fft.fftshift(f)
+
+    # 4. Compute magnitude and Apply Log Scale
+    # We add 1 to avoid log(0) errors. 20 is a standard scaling factor.
+    magnitude_spectrum = 20 * np.log(np.abs(fshift) + 1)
+
+    return magnitude_spectrum
+
+
+def show_fourier_comparison(good_blend, bad_blend):
+    """
+    Calculates and plots the Fourier Transform of two images side-by-side.
+    """
+    # Calculate Spectra
+    mag_good = get_magnitude_spectrum(good_blend)
+    mag_bad = get_magnitude_spectrum(bad_blend)
+
+    # Plotting
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+
+    # Good Blend Spectrum
+    axes[0].imshow(mag_good, cmap='gray')
+    axes[0].set_title('Magnitude Spectrum (Good Blend)')
+    axes[0].axis('off')
+
+    # Bad Blend Spectrum
+    axes[1].imshow(mag_bad, cmap='gray')
+    axes[1].set_title('Magnitude Spectrum (Bad Blend)')
+    axes[1].axis('off')
+
+    plt.show()
+
+def show_pyramid(pyr1: List[np.ndarray], pyr2: List[np.ndarray]):
+    """
+    Displays pyramid levels side-by-side in large windows.
+    """
+    for i, (im1, im2) in enumerate(zip(pyr1, pyr2)):
+        # 1. Create a NEW figure for each level with a LARGE size
+        fig, ax = plt.subplots(1, 2, figsize=(6, 6))
+
+        # 2. Normalize Laplacian levels for display (if needed)
+        if im1.min() < 0: im1 = np.clip(im1 + 0.5, 0, 1)
+        if im2.min() < 0: im2 = np.clip(im2 + 0.5, 0, 1)
+
+        # 3. Plot
+        add_sub_figure(im1, ax=ax[0])
+        add_sub_figure(im2, ax=ax[1])
+        ax[0].set_title(f"Level {i}")
+        ax[1].set_title(f"Level {i}")
+
+        # 5. Show and wait
+        plt.show()
+
+
+def add_brightness(img, value):
+    img = img + value
+    return np.clip(img, 0, 1)
+
+def main_blend(im1_path: str, im2_path: str):
     right_img = plt.imread(im1_path)
     left_img = plt.imread(im2_path)
-    number_of_levels = 10
+    if left_img.shape != right_img.shape:
+        # resize expects (Height, Width, Channels)
+        left_img = resize(left_img, right_img.shape, anti_aliasing=True)
+    number_of_levels = 4
     filter_size = 5
     mask = np.zeros((right_img.shape[0], right_img.shape[1]))
     mask[:, :mask.shape[1] // 2] = 1.0
-    blended_image = image_blending(left_img, right_img, mask, number_of_levels, filter_size)
-    show_image(blended_image, output_path)
-    show_image(mask, "mask.png")
+    blended_image = image_blending(left_img, right_img, mask,number_of_levels, filter_size)
+    show_image(blended_image, )
+    show_image(mask, )
 
-def main_hybrid(im1_path: str, im2_path: str, output_path: str=None):
+def main_hybrid(im1_path: str, im2_path: str):
     far_image = rgb2gray(plt.imread(im1_path))
     close_image = rgb2gray(plt.imread(im2_path))
-    kernel_size = 50
-    hybrid_image = create_hybrid_image(far_image, close_image, kernel_size)
-    show_image(hybrid_image, output_path)
-    show_image(close_image, "close.png")
-    show_image(far_image, "far_image.png")
+
+    hybrid_image = create_hybrid_image(far_image, close_image, 64)
+    show_image(hybrid_image, "hybrid.png")
+    hybrid_image = create_hybrid_image(far_image, close_image, 2)
+    show_image(hybrid_image, "bad_hybrid.png")
+
+def main_blend_pyramid():
+    right_img = plt.imread("right.png")
+    left_img = plt.imread("left.png")
+    if left_img.shape != right_img.shape:
+        # resize expects (Height, Width, Channels)
+        left_img = resize(left_img, right_img.shape, anti_aliasing=True)
+    filter_size = 5
+    mask = np.zeros((right_img.shape[0], right_img.shape[1]))
+    mask[:, :mask.shape[1] // 2] = 1.0
+    good_blended_image = image_blending(left_img, right_img, mask, 8, filter_size)
+    bad_blended_image = image_blending(left_img, right_img, mask, 2, filter_size)
+    # good_pyr = build_gaussian_pyramid(good_blended_image, 10, filter_size)
+    # bad_pyr = build_gaussian_pyramid(bad_blended_image, 10, filter_size)
+    good_pyr = build_laplacian_pyramid(good_blended_image, 10, filter_size)
+    bad_pyr = build_laplacian_pyramid(bad_blended_image, 10, filter_size)
+    show_pyramid(good_pyr, bad_pyr)
+
+def main_fft():
+    good_img = plt.imread("blended.png")
+    bad_img = plt.imread("bad_blended.png")
+    if good_img.shape != bad_img.shape:
+        # resize expects (Height, Width, Channels)
+        good_img = resize(good_img, bad_img.shape, anti_aliasing=True)
+    show_fourier_comparison(good_img, bad_img)
 
 
 if __name__ == "__main__":
-    main_blend("right.png", "left.png", "blended.png")
+    main_fft()
 
-    main_hybrid("dragon.png", "mouse.png", "hybrid.png")
