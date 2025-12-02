@@ -172,7 +172,7 @@ def show_image(img, save_path=None):
     plt.imshow(img, cmap='gray')
     plt.axis('off')
     if save_path:
-        plt.savefig(save_path)
+        plt.imsave(save_path, img, cmap='gray')
     plt.show()
 
 def add_sub_figure(img, ax):
@@ -203,28 +203,34 @@ def get_magnitude_spectrum(img):
     return magnitude_spectrum
 
 
-def show_fourier_comparison(good_blend, bad_blend):
-    """
-    Calculates and plots the Fourier Transform of two images side-by-side.
-    """
-    # Calculate Spectra
-    mag_good = get_magnitude_spectrum(good_blend)
-    mag_bad = get_magnitude_spectrum(bad_blend)
+def show_fourier_comparison(im1, im2):
+    mag_good = get_magnitude_spectrum(im1)
+    mag_bad = get_magnitude_spectrum(im2)
 
-    # Plotting
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    # Calculate a saturation limit (e.g., 95th percentile)
+    # This makes the center "burn out" to white, revealing the dark details
+    v_max = np.percentile(mag_good, 95)
+    v_min = np.min(mag_good)
 
-    # Good Blend Spectrum
-    axes[0].imshow(mag_good, cmap='gray')
-    axes[0].set_title('Magnitude Spectrum (Good Blend)')
-    axes[0].axis('off')
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 
-    # Bad Blend Spectrum
-    axes[1].imshow(mag_bad, cmap='gray')
-    axes[1].set_title('Magnitude Spectrum (Bad Blend)')
-    axes[1].axis('off')
+    # Plot Good
+    axes[0].imshow(mag_good, cmap='gray', vmin=v_min, vmax=v_max)
+    axes[0].set_title('Good Blend')
 
+    # Plot Bad
+    axes[1].imshow(mag_bad, cmap='gray', vmin=v_min, vmax=v_max)
+    axes[1].set_title('Bad Blend')
+
+    # Plot Difference (The Proof)
+    # This subtracts the common parts and leaves ONLY the artifact
+    diff = np.abs(mag_bad - mag_good)
+    axes[2].imshow(diff, cmap='inferno')
+    axes[2].set_title('Difference (Bad - Good)')
+
+    for ax in axes: ax.axis('off')
     plt.show()
+
 
 def show_pyramid(pyr1: List[np.ndarray], pyr2: List[np.ndarray]):
     """
@@ -248,23 +254,18 @@ def show_pyramid(pyr1: List[np.ndarray], pyr2: List[np.ndarray]):
         plt.show()
 
 
-def add_brightness(img, value):
-    img = img + value
-    return np.clip(img, 0, 1)
-
 def main_blend(im1_path: str, im2_path: str):
     right_img = plt.imread(im1_path)
     left_img = plt.imread(im2_path)
     if left_img.shape != right_img.shape:
         # resize expects (Height, Width, Channels)
         left_img = resize(left_img, right_img.shape, anti_aliasing=True)
-    number_of_levels = 4
+    number_of_levels = 8
     filter_size = 5
     mask = np.zeros((right_img.shape[0], right_img.shape[1]))
     mask[:, :mask.shape[1] // 2] = 1.0
     blended_image = image_blending(left_img, right_img, mask,number_of_levels, filter_size)
-    show_image(blended_image, )
-    show_image(mask, )
+    show_image(blended_image, "blended2.png")
 
 def main_hybrid(im1_path: str, im2_path: str):
     far_image = rgb2gray(plt.imread(im1_path))
@@ -292,15 +293,46 @@ def main_blend_pyramid():
     bad_pyr = build_laplacian_pyramid(bad_blended_image, 10, filter_size)
     show_pyramid(good_pyr, bad_pyr)
 
-def main_fft():
-    good_img = plt.imread("blended.png")
-    bad_img = plt.imread("bad_blended.png")
-    if good_img.shape != bad_img.shape:
-        # resize expects (Height, Width, Channels)
-        good_img = resize(good_img, bad_img.shape, anti_aliasing=True)
-    show_fourier_comparison(good_img, bad_img)
+
+def main_fft_analysis():
+    # 1. Load Source Images ONCE
+    right_img = plt.imread("right.png")
+    left_img = plt.imread("left.png")
+
+    # 2. Ensure identical size immediately
+    if left_img.shape != right_img.shape:
+        left_img = resize(left_img, right_img.shape, anti_aliasing=True)
+
+    # 3. Setup Mask
+    mask = np.zeros((right_img.shape[0], right_img.shape[1]))
+    mask[:, :mask.shape[1] // 2] = 1.0
+    filter_size = 5
+
+    # 4. Generate BOTH blends in memory (No saving to disk!)
+    # This guarantees they align pixel-perfectly.
+    print("Generating Good Blend...")
+    good_blend = image_blending(left_img, right_img, mask, max_levels=10, filter_size=filter_size)
+
+    print("Generating Bad Blend...")
+    bad_blend = image_blending(left_img, right_img, mask, max_levels=1, filter_size=filter_size)
+
+    # 5. Convert to Grayscale for FFT
+    if good_blend.ndim == 3:
+        # Handle RGBA or RGB
+        if good_blend.shape[-1] == 4: good_blend = good_blend[:, :, :3]
+        good_gray = rgb2gray(good_blend)
+    else:
+        good_gray = good_blend
+
+    if bad_blend.ndim == 3:
+        if bad_blend.shape[-1] == 4: bad_blend = bad_blend[:, :, :3]
+        bad_gray = rgb2gray(bad_blend)
+    else:
+        bad_gray = bad_blend
+
+    # 6. Show FFT Comparison
+    show_fourier_comparison(good_gray, bad_gray)
 
 
 if __name__ == "__main__":
-    main_fft()
-
+    main_fft_analysis()
