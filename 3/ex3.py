@@ -1,11 +1,12 @@
 from typing import List
-
+import os
 import numpy as np
 from scipy.signal import convolve2d
 import matplotlib.pyplot as plt
 from skimage.color import rgb2gray
 from skimage.transform import resize
-
+INPUTS_DIR = 'inputs'
+OUTPUTS_DIR = 'outputs'
 
 def generate_gaussian_kernel(kernel_size):
     if kernel_size == 1: return np.array([[1]])
@@ -148,21 +149,25 @@ def image_blending(im1, im2, mask, max_levels, filter_size):
     return np.clip(im_blended, 0, 1)
 
 
-def  create_hybrid_image(im_far, im_close, kernel_size, hybrid_factor=1.5):
-    # 1. Low Pass (התמונה הרחוקה - הדרקון)
-    kernel_row = generate_gaussian_kernel(kernel_size)
-    kernel_col = kernel_row.T
+def create_hybrid_image(im_far, im_close, level,filter_size=5):
+    far_pyr = build_gaussian_pyramid(im_far, level + 1, filter_size)
+    close_pyr = build_gaussian_pyramid(im_close, level + 1, filter_size)
 
-    blur_far = convolve2d(im_far, kernel_col, mode='same', boundary='symm')
-    low_freq = convolve2d(blur_far, kernel_row, mode='same', boundary='symm')
+    # 2. Extract Low Frequencies (Far Image)
+    # לוקחים את התמונה הקטנה מהרמה ה-N ומגדילים אותה חזרה לגודל המקורי
+    # זה נותן אפקט של Low Pass Filter חזק מאוד
+    low_freq_small = far_pyr[level]
+    low_freq = resize(low_freq_small, im_far.shape, anti_aliasing=True)
 
-    # 2. High Pass (התמונה הקרובה - העכבר)
-    blur_close_col = convolve2d(im_close, kernel_col, mode='same', boundary='symm')
-    blur_close = convolve2d(blur_close_col, kernel_row, mode='same', boundary='symm')
-    high_freq = im_close - blur_close
+    # 3. Extract High Frequencies (Close Image)
+    # לוקחים את הגרסה המטושטשת של התמונה הקרובה
+    close_blurred_small = close_pyr[level]
+    close_blurred = resize(close_blurred_small, im_close.shape, anti_aliasing=True)
 
-    # --- התיקון: הגברת התדרים הגבוהים ---
-    # נכפיל את הפרטים בפקטור (למשל 1.5 או 2.0) כדי שיהיו ברורים יותר מקרוב
+    # מחסירים אותה מהמקור כדי לקבל רק את הפרטים (High Pass)
+    high_freq = im_close - close_blurred
+
+    # 4. Combine
     hybrid = low_freq + high_freq
 
     return np.clip(hybrid, 0, 1)
@@ -189,15 +194,8 @@ def get_magnitude_spectrum(img):
         if img.shape[-1] == 4:
             img = img[:, :, :3]
         img = rgb2gray(img)
-
-    # 2. Compute the 2D Fourier Transform
     f = np.fft.fft2(img)
-
-    # 3. Shift the zero-frequency component to the center of the spectrum
     fshift = np.fft.fftshift(f)
-
-    # 4. Compute magnitude and Apply Log Scale
-    # We add 1 to avoid log(0) errors. 20 is a standard scaling factor.
     magnitude_spectrum = 20 * np.log(np.abs(fshift) + 1)
 
     return magnitude_spectrum
@@ -265,20 +263,25 @@ def main_blend(im1_path: str, im2_path: str):
     mask = np.zeros((right_img.shape[0], right_img.shape[1]))
     mask[:, :mask.shape[1] // 2] = 1.0
     blended_image = image_blending(left_img, right_img, mask,number_of_levels, filter_size)
-    show_image(blended_image, "blended2.png")
+    show_image(blended_image, )
 
-def main_hybrid(im1_path: str, im2_path: str):
-    far_image = rgb2gray(plt.imread(im1_path))
-    close_image = rgb2gray(plt.imread(im2_path))
+def main_hybrid():
+    far_path = os.path.join(INPUTS_DIR, "dragon.png")
+    close_path = os.path.join(INPUTS_DIR, "mouse.png")
 
-    hybrid_image = create_hybrid_image(far_image, close_image, 64)
-    show_image(hybrid_image, "hybrid.png")
-    hybrid_image = create_hybrid_image(far_image, close_image, 2)
-    show_image(hybrid_image, "bad_hybrid.png")
+    far_image = rgb2gray(plt.imread(far_path))
+    close_image = rgb2gray(plt.imread(close_path))
+
+    # כעת אנו משתמשים בפרמטר 'level' במקום 'kernel_size'.
+    # נסה לשחק עם level בין 2 ל-5.
+    # level=3 בדרך כלל נותן תוצאה מעולה (מקביל לקרנל ענק של ~30-40)
+    hybrid_image = create_hybrid_image(far_image, close_image, 3)
+
+    show_image(hybrid_image, os.path.join(OUTPUTS_DIR, "hybrid.png"))
 
 def main_blend_pyramid():
-    right_img = plt.imread("right.png")
-    left_img = plt.imread("left.png")
+    right_img = plt.imread(os.path.join(INPUTS_DIR, "right.png"))
+    left_img = plt.imread(os.path.join(INPUTS_DIR, "left.png"))
     if left_img.shape != right_img.shape:
         # resize expects (Height, Width, Channels)
         left_img = resize(left_img, right_img.shape, anti_aliasing=True)
@@ -296,8 +299,8 @@ def main_blend_pyramid():
 
 def main_fft_analysis():
     # 1. Load Source Images ONCE
-    right_img = plt.imread("right.png")
-    left_img = plt.imread("left.png")
+    right_img = plt.imread(os.path.join(INPUTS_DIR, "right.png"))
+    left_img = plt.imread(os.path.join(INPUTS_DIR, "left.png"))
 
     # 2. Ensure identical size immediately
     if left_img.shape != right_img.shape:
@@ -335,4 +338,4 @@ def main_fft_analysis():
 
 
 if __name__ == "__main__":
-    main_fft_analysis()
+    main_hybrid()
