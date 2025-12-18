@@ -150,10 +150,39 @@ def lk_for_x_y(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[int, int]:
     return int(round(u)), int(round(v))
 
 
-def find_rotation_angle(I1: np.ndarray, I2: np.ndarray) -> float:
+
+
+
+def create_empty_panorama(video: np.ndarray) -> np.ndarray:
+    """
+    Computes the size of the panorama needed to fit all frames based on the shifts.
+    Returns (min_x, max_x, min_y, max_y).
+    """
+    frame_hight, frame_width = video.shape[1], video.shape[2]
+    xshifts, yshifts = get_video_shifts(video)
+    cum_xshifts = np.cumsum(xshifts)
+    cum_yshifts = np.cumsum(yshifts)
+    panorama_size = frame_hight + cum_xshifts[-1], frame_width + cum_yshifts[-1]
+    return np.zeros(panorama_size, dtype=video.dtype)
+
+def get_video_shifts(video: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Computes (dx, dy, dtheta) between consecutive frames.
+    """
+    num_frames = video.shape[0]
+    x_shifts = np.zeros(num_frames)
+    y_shifts = np.zeros(num_frames)
+    th_shifts = np.zeros(num_frames)
+
+    for i in range(num_frames - 1):
+        x_shifts[i], y_shifts[i], th_shifts[i] = lucas_kanade(video[i], video[i + 1])
+
+    return x_shifts, y_shifts, th_shifts
+
+
+def find_rotation_angle(I1: np.ndarray, I2: np.ndarray) -> int:
     """
     Estimates the rotation angle (theta) from I1 to I2.
-
     Uses a Pyramid and Joint Solver (u, v, theta) to robustly distinguish
     true rotation from large translations.
     """
@@ -162,7 +191,7 @@ def find_rotation_angle(I1: np.ndarray, I2: np.ndarray) -> float:
     FILTER_SIZE = 3
     ITERATIONS = 10
 
-    # Build Pyramids for robust large-displacement handling
+    # Build Pyramids
     pyr1 = build_gaussian_pyramid(I1, PYRAMID_LEVELS, FILTER_SIZE)
     pyr2 = build_gaussian_pyramid(I2, PYRAMID_LEVELS, FILTER_SIZE)
 
@@ -192,7 +221,6 @@ def find_rotation_angle(I1: np.ndarray, I2: np.ndarray) -> float:
             M[1, 2] -= v
 
             # 2. Warp I1 towards I2 using Inverse Map
-            # This samples I1 at (R^-1 * (x - T))
             im1_warp = cv2.warpAffine(
                 im1_lvl, M, (w, h),
                 flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP,
@@ -209,7 +237,9 @@ def find_rotation_angle(I1: np.ndarray, I2: np.ndarray) -> float:
 
             # 4. Jacobians
             # J_u = -Ix, J_v = -Iy
-            # J_theta = (x * Iy - y * Ix)
+            # J_theta (Calculated) = x*Iy - y*Ix
+            # Theoretical Deriv dI/dTh = y*Ix - x*Iy
+            # So J_theta here is effectively -dI/dTh (Negative Derivative)
             J_theta = (x_grid * Iy - y_grid * Ix) * (np.pi / 180.0)
 
             # 5. Build System
@@ -231,20 +261,27 @@ def find_rotation_angle(I1: np.ndarray, I2: np.ndarray) -> float:
                 [Ixt, Iyt, Itt]
             ])
 
-            # b = - Sum(Jacobian * Error)
-            # b_u = - Sum(-Ix * It) = Sum(Ix * It)
-            # b_th = - Sum(J_theta * It)
+            # b Calculation
+            # We need b = - (Jacobian * Error)
+            # b_u = - sum(-Ix * It) = sum(Ix * It)
+            # b_v = - sum(-Iy * It) = sum(Iy * It)
+            # b_th = - sum(J_theta * It)  <-- Wait!
+            # Since J_theta is ALREADY negative derivative,
+            # - (J_theta * It) would be Positive Gradient. We want Negative Gradient.
+            # So we strictly want: b_th = sum(J_theta * It)
+
             b = np.array([
                 np.dot(Ix_f, It_f),
                 np.dot(Iy_f, It_f),
-                -np.dot(Jth_f, It_f)
+                np.dot(Jth_f, It_f)  # [CORRECTION] Removed the negative sign here
             ])
 
             try:
-                delta = np.linalg.lstsq(A, b, rcond=None)[0]
+                # Use pinv for stability on featureless images (like the square)
+                delta = np.linalg.pinv(A) @ b
                 du, dv, dtheta = delta
 
-                # Additive Update (consistent with M construction)
+                # Additive Update
                 u += du
                 v += dv
                 theta += dtheta
@@ -255,12 +292,12 @@ def find_rotation_angle(I1: np.ndarray, I2: np.ndarray) -> float:
                 break
 
     # Return only the rotation component
-    return theta
+    return -int(round(theta))
 
 
 def lucas_kanade(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[int, int, int]:
     """
-    1. Finds rotation theta (robustly).
+    1. Finds rotation theta using a pyramid (robust to large shifts).
     2. Rotates frame2 by -theta to align with frame1.
     3. Uses lk_for_x_y to find translation (u, v).
     """
@@ -268,7 +305,6 @@ def lucas_kanade(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[int, int, int]
     I2 = lk_prep_image(frame2)
 
     # Step 1: Find Rotation Angle
-    # Now returns ~0.0 for pure translation inputs
     theta = find_rotation_angle(I1, I2)
 
     # Step 2: Compensate for Rotation
@@ -287,60 +323,10 @@ def lucas_kanade(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[int, int, int]
     )
 
     # Step 3: Find Translation
-    # Now lk_for_x_y receives images that are actually aligned rotationally
     u, v = lk_for_x_y(I1, I2_aligned)
 
     return int(u), int(v), int(round(theta))
 
 
-def get_video_shifts(video: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Computes (dx, dy, dtheta) between consecutive frames.
-    """
-    num_frames = video.shape[0]
-    x_shifts = np.zeros(num_frames)
-    y_shifts = np.zeros(num_frames)
-    th_shifts = np.zeros(num_frames)
-
-    for i in range(num_frames - 1):
-        x_shifts[i], y_shifts[i], th_shifts[i] = lucas_kanade(video[i], video[i + 1])
-
-    return x_shifts, y_shifts, th_shifts
-
-def get_video_shifts(video: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Computes the (x, y) shifts between consecutive frames in a video using Lucas-Kanade optical flow.
-    Returns a list of shifts [(dx1, dy1), (dx2, dy2), ...].
-    """
-
-    num_frames = video.shape[0]
-    x_shifts = np.zeros((num_frames))
-    y_shifts = np.zeros((num_frames))
-    ang_shifts = np.zeros((num_frames))
-
-    for i in range(num_frames - 1):
-        x_shifts[i], y_shifts[i], ang_shifts[i] = lucas_kanade(video[i], video[i + 1])
-
-    return x_shifts, y_shifts, ang_shifts
-
-def create_empty_panorama(video: np.ndarray) -> np.ndarray:
-    """
-    Computes the size of the panorama needed to fit all frames based on the shifts.
-    Returns (min_x, max_x, min_y, max_y).
-    """
-    frame_hight, frame_width = video.shape[1], video.shape[2]
-    xshifts, yshifts = get_video_shifts(video)
-    cum_xshifts = np.cumsum(xshifts)
-    cum_yshifts = np.cumsum(yshifts)
-    panorama_size = frame_hight + cum_xshifts[-1], frame_width + cum_yshifts[-1]
-    return np.zeros(panorama_size, dtype=video.dtype)
-
-
 if __name__ == "__main__":
-    # Test with your failing case
-    shifts = (-2, 7)
-    video = create_diagonal_square_video(100, start_loc=(100, 100), shift=shifts, size=20)
-
-    u, v, theta = lucas_kanade(video[10], video[11])
-    print(f"Target: {shifts[0]} {shifts[1]}")
-    print(f"Result: {u} {v} {theta}")
+    pass

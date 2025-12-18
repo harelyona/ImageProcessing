@@ -2,6 +2,7 @@ import os
 from typing import Tuple
 import numpy as np
 import cv2
+import mediapy as mp
 
 # Constants
 FPS = 30
@@ -82,6 +83,47 @@ def create_diagonal_square_video(num_frames: int, start_loc: Tuple[int, int], sh
     return np.array(frames)
 
 
+def create_rotated_square_video(num_frames: int, start_loc: Tuple[int, int], angle_per_frame: float,
+                                size: int) -> np.ndarray:
+    """
+    Creates a video where the entire view rotates around the image center.
+    This simulates a camera rolling.
+
+    Args:
+        angle_per_frame: Degrees to rotate per frame (Positive = Counter-Clockwise).
+    """
+    frames = []
+
+    # 1. Create the base frame with the square in its initial position
+    # We do this once because the object itself isn't moving, the "camera" is.
+    base_frame = create_square_frame(size=size, upper_left_loc=start_loc)
+
+    # Center of rotation (Image Center)
+    center = (FRAME_WIDTH // 2, FRAME_HEIGHT // 2)
+
+    for i in range(num_frames):
+        current_angle = i * angle_per_frame
+
+        # 2. Get the rotation matrix for the current angle
+        # center: (x, y), angle: degrees, scale: 1.0
+        M = cv2.getRotationMatrix2D(center, current_angle, 1.0)
+
+        # 3. Apply the rotation to the base frame
+        # borderValue=BG_COLOR ensures the background stays black when corners rotate in
+        rotated_frame = cv2.warpAffine(
+            base_frame,
+            M,
+            (FRAME_WIDTH, FRAME_HEIGHT),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=BG_COLOR
+        )
+
+        frames.append(rotated_frame)
+
+    return np.array(frames)
+
+
 # --- Helper for viewing ---
 def play_video(video_ndarray: np.ndarray) -> None:
     if video_ndarray.size == 0:
@@ -118,4 +160,5 @@ def save_video(frames: list, filename: str) -> None:
 
 # --- Example Usage ---
 if __name__ == "__main__":
-    play_video(create_horizontal_square_video(num_frames=60, row=100, start_col=50, shift=20, size=100, save_path=VIDEOS_SAVE_PATH + "horizontal"))
+    video = create_rotated_square_video(num_frames=150, start_loc=(370, 190), angle_per_frame=5, size=50)
+    play_video(video)
