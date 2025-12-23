@@ -509,11 +509,10 @@ def align_to_middle_frame(frames, motion_matrices):
     return np.array(warped_frames), (output_height, output_width)
 
 
-def strip_stitching_with_rotation(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> np.ndarray:
+def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> np.ndarray:
     """
-    1. Rotates each frame to make the horizon flat (stabilization).
-    2. Cuts a vertical strip.
-    3. Pastes it onto the canvas.
+    Creates a strip panorama, but fills the start and end with the
+    full sides of the first and last frames.
     """
     h, w = frames[0].shape[:2]
     num_frames = len(frames)
@@ -521,77 +520,99 @@ def strip_stitching_with_rotation(frames: np.ndarray, dx: np.ndarray, dy: np.nda
 
     # 1. Calculate Canvas Size
     total_dx = int(np.sum(np.abs(dx)))
-    # We add extra height padding because rotation might push pixels up/down
+    # Ensure canvas is wide enough for the full first frame + all movement + full last frame
     canvas_w = total_dx + w
     canvas_h = h + int(np.sum(np.abs(dy))) + 200
 
     panorama = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
 
+    # Start writing at x=0 (The absolute left edge of the first frame)
     current_x = 0
-    current_y = int(np.sum(np.abs(dy))) // 2 + 100  # Start with buffer
 
-    # Track the absolute angle of the camera (cumulative rotation)
+    # Start Y with buffer
+    current_y = int(np.sum(np.abs(dy))) // 2 + 100
+
+    # Accumulators
     current_angle = 0.0
 
     for i in range(num_frames - 1):
-        # Update camera angle
-        current_angle += dtheta[i + 1]
-
-        # 1. ROTATE the frame to cancel the camera's roll
-        # If camera rotated +2 degrees, we rotate image -2 degrees to level it.
+        # 1. Rotate the frame to stabilize horizon
+        # Note: We rotate FIRST, then update the angle for the next frame.
+        # This ensures Frame 0 is treated as the anchor (Rotation 0).
         M_rot = cv2.getRotationMatrix2D((center_x, center_y), -current_angle, 1.0)
 
-        # We rotate the specific frame before cutting
         rotated_frame = cv2.warpAffine(
             frames[i],
             M_rot,
             (w, h),
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0)
+            borderValue=(0,0,0)
         )
 
-        # 2. Determine Strip Width
-        shift_x = int(round(abs(dx[i + 1])))
-        if shift_x <= 0:
-            width_of_strip = 1
+        # 2. Determine Strip Width (Motion to next frame)
+        shift_x = int(round(abs(dx[i+1])))
+        strip_width = max(1, shift_x)
+
+        # --- THE NEW FEATURE: FILL LOGIC ---
+        if i == 0:
+            # FIRST FRAME: Take everything from Left Edge (0) to the end of the strip
+            col_start = 0
+            col_end = center_x + strip_width
         else:
-            width_of_strip = shift_x
+            # MIDDLE FRAMES: Standard Center Strip
+            col_start = center_x
+            col_end = center_x + strip_width
 
-        # 3. Cut Strip from the ROTATED frame
-        strip = rotated_frame[:, center_x: center_x + width_of_strip, :]
+        # 3. Cut & Paste
+        strip = rotated_frame[:, col_start : col_end, :]
+        paste_width = strip.shape[1]
 
-        # 4. Calculate Placement (Paste)
-        shift_y = int(round(dy[i + 1]))
-
-        # Update vertical position (compensate for vertical shake)
-        # Note: We subtract dy because if camera moves UP, we paste DOWN.
-        current_y -= shift_y
-
+        # Calculate Y placement
         start_y = current_y
         end_y = start_y + h
 
-        # Safety bounds
         if start_y < 0: start_y = 0
         if end_y > canvas_h: end_y = canvas_h
 
         strip_h = end_y - start_y
         if strip_h > 0:
-            # Handle cases where the strip height exceeds canvas or frame bounds slightly
-            paste_strip = strip[:strip_h, :, :]
+             p_strip = strip[:strip_h, :, :]
+             # Paste into panorama
+             panorama[start_y : start_y + p_strip.shape[0], current_x : current_x + paste_width, :] = p_strip
 
-            # If we hit the bottom of canvas, clip the strip
-            if paste_strip.shape[0] > (canvas_h - start_y):
-                paste_strip = paste_strip[:(canvas_h - start_y), :, :]
+        # Advance X Cursor
+        current_x += paste_width
 
-            panorama[start_y: start_y + paste_strip.shape[0],
-            current_x: current_x + width_of_strip, :] = paste_strip
+        # Update Accumulators for the NEXT frame
+        current_y -= int(round(dy[i+1]))
+        current_angle += dtheta[i+1]
 
-        current_x += width_of_strip
+    # --- END FILL (LAST FRAME) ---
+    # We are now at the last frame index. We need to fill the "Right Wing".
+    last_idx = num_frames - 1
 
-    # Crop black finish
+    # Rotate the last frame using the final accumulated angle
+    M_rot = cv2.getRotationMatrix2D((center_x, center_y), -current_angle, 1.0)
+    rotated_last = cv2.warpAffine(frames[last_idx], M_rot, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0))
+
+    # Take from Center to the absolute Right Edge
+    end_chunk = rotated_last[:, center_x : w, :]
+
+    # Paste
+    start_y = current_y
+    end_y = start_y + h
+    strip_h = end_y - start_y
+
+    if strip_h > 0:
+        p_chunk = end_chunk[:strip_h, :, :]
+        # Check if we fit in canvas width
+        if current_x + p_chunk.shape[1] <= canvas_w:
+            panorama[start_y : start_y + p_chunk.shape[0], current_x : current_x + p_chunk.shape[1], :] = p_chunk
+            current_x += p_chunk.shape[1]
+
+    # Crop unused canvas space
     return panorama[:, :current_x, :]
-
 
 
 boat_x = 0,0.00000,-7.00000,-5.00000,-4.00000,-3.00000,-3.00000,-4.00000,-3.00000,-3.00000,-4.00000,-4.00000,-3.00000,-2.00000,-3.00000,-4.00000,-4.00000,-2.00000,-4.00000,-2.00000,-4.00000,-4.00000,-3.00000,-3.00000,-5.00000,-4.00000,-4.00000,-4.00000,-3.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-3.00000,-4.00000,-3.00000,-4.00000,-4.00000,-5.00000,-4.00000,-3.00000,-4.00000,-3.00000,-4.00000,-3.00000,-4.00000,-4.00000,-5.00000,-4.00000,-5.00000,-3.00000,-3.00000,-2.00000,-5.00000,-3.00000,-5.00000,-3.00000,-2.00000,-3.00000,-2.00000,0.00000,-3.00000,-3.00000,-3.00000,-3.00000,-4.00000,-4.00000,-5.00000,-5.00000,-6.00000,-6.00000,-3.00000,-4.00000,-4.00000,-3.00000,-3.00000,-4.00000,-2.00000,-4.00000,-3.00000,-4.00000,-3.00000,-3.00000,-4.00000,-4.00000,-4.00000,-5.00000,-5.00000,-6.00000,-4.00000,-2.00000,-4.00000,-4.00000,-4.00000,-4.00000,-3.00000,-5.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-5.00000,-4.00000,-5.00000,-5.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-5.00000,-4.00000,-3.00000,-4.00000,-5.00000,-3.00000,-3.00000,-3.00000,-5.00000,-5.00000,-5.00000,-3.00000,-5.00000,-4.00000,-5.00000,-5.00000,-4.00000,-6.00000,-7.00000,-5.00000,-5.00000,-5.00000,-3.00000,-3.00000,-2.00000,-3.00000,-3.00000,-3.00000,-5.00000,-3.00000,-6.00000,-4.00000,-4.00000,-5.00000,-6.00000,-4.00000,-4.00000,-4.00000,-6.00000,-3.00000,-4.00000,-4.00000,-4.00000,-5.00000,-6.00000,-4.00000,-6.00000,-6.00000,-6.00000,-4.00000,-5.00000,-4.00000,-2.00000,-3.00000,-3.00000,-4.00000,-4.00000,-5.00000,-5.00000,-3.00000,-6.00000,-5.00000,-6.00000,-4.00000,-4.00000,-4.00000,-4.00000,-5.00000,-3.00000,-5.00000,-4.00000,-4.00000,-6.00000,-4.00000,-5.00000,-6.00000,-4.00000,-5.00000,-5.00000,-3.00000,-4.00000,-4.00000,-5.00000,-3.00000,-7.00000,-3.00000,-4.00000,-1.00000,-4.00000,-4.00000,-4.00000,-4.00000,-6.00000,-4.00000,-5.00000,-3.00000,-3.00000,-4.00000,-4.00000,-5.00000,-5.00000,-4.00000,-4.00000,-5.00000,-5.00000,-5.00000,-4.00000,-3.00000,-4.00000,-4.00000,-3.00000,-4.00000,-5.00000,-6.00000,-6.00000,-6.00000,-4.00000,-3.00000,-4.00000,-6.00000,-2.00000,-4.00000,-4.00000,-4.00000,-6.00000,-5.00000,-5.00000,-5.00000,-6.00000,-6.00000,-4.00000,-5.00000,-5.00000,-5.00000,-6.00000,-6.00000,-6.00000,-6.00000,-7.00000,-7.00000,-6.00000,-7.00000,-8.00000,-7.00000,-6.00000,-6.00000,-8.00000,-7.00000,-6.00000,-7.00000,-6.00000,-8.00000,-7.00000,-7.00000,-6.00000,-7.00000,-7.00000,-6.00000,-7.00000,-7.00000,-7.00000,-6.00000,-6.00000,-6.00000,-6.00000,-6.00000,-6.00000,-6.00000,-6.00000,-6.00000,-5.00000,-4.00000,-5.00000,-4.00000,-7.00000,-5.00000,-5.00000,-6.00000,-6.00000,-6.00000,-6.00000,-7.00000,-6.00000,-5.00000,-6.00000,-6.00000,-3.00000,-6.00000,-7.00000,-8.00000,-7.00000,-7.00000,-7.00000,-6.00000,-7.00000,-5.00000,-5.00000,-7.00000,-6.00000,-6.00000,-6.00000,-7.00000,-7.00000,-7.00000,-7.00000,-7.00000,-8.00000,-7.00000,-7.00000,-5.00000,-7.00000,-6.00000,-7.00000,-6.00000,-7.00000,-7.00000,-7.00000,-7.00000,-7.00000,-6.00000,-5.00000,-5.00000,-5.00000,-6.00000,-4.00000,-5.00000,-5.00000,-6.00000,-9.00000,-6.00000,-10.00000,-8.00000,-8.00000,-7.00000,-7.00000,-7.00000,-7.00000,-5.00000,-10.00000,-7.00000,-9.00000,-9.00000,-10.00000,-8.00000,-9.00000,-6.00000,-7.00000,-8.00000,-10.00000,-7.00000,-9.00000,-9.00000,-9.00000,-9.00000,-11.00000,-8.00000,-10.00000,-8.00000,-10.00000,-9.00000,-9.00000,-9.00000,-8.00000,-10.00000,-9.00000,-9.00000,-9.00000,-9.00000,-10.00000,-10.00000,-8.00000,-8.00000,-9.00000,-6.00000,-8.00000,-6.00000,-7.00000,-8.00000,-9.00000,-8.00000,-9.00000,-8.00000,-7.00000,-7.00000,-7.00000,-6.00000,-4.00000,-5.00000,-8.00000,-7.00000,-7.00000,-7.00000,-8.00000,-7.00000,-6.00000,-8.00000,-6.00000,-7.00000,-7.00000,-6.00000,-7.00000,-8.00000,-7.00000,-7.00000,-7.00000,-8.00000,-6.00000,-8.00000,-7.00000,-8.00000,-6.00000,-9.00000,-7.00000,-7.00000,-7.00000,-5.00000,-7.00000,-7.00000,-6.00000,-6.00000,-6.00000,-8.00000,-7.00000,-7.00000,-8.00000,-8.00000,-8.00000,-7.00000,-7.00000,-7.00000,-8.00000,-6.00000,-7.00000,-7.00000,-8.00000
@@ -616,12 +637,10 @@ if __name__ == "__main__":
 
         # 2. Stitching with Rotation Correction
         print("Stitching with Rotation...")
-        panorama = strip_stitching_with_rotation(boat_video, dx, dy, dtheta)
+        panorama = strip_stitching(boat_video, dx, dy, dtheta)
 
         plt.figure(figsize=(15, 6))
         plt.title("Boat Panorama (De-Rotated Strips)")
         plt.imshow(panorama)
         plt.axis('off')
         plt.show()
-
-        plt.imsave("strip_panorama_rotated.png", panorama)
