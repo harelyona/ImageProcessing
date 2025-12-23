@@ -5,7 +5,7 @@ import cv2
 from matplotlib import pyplot as plt
 from numpy import floating, complexfloating, timedelta64
 from openpyxl.styles.alignment import horizontal_alignments
-from mediapy import read_video
+from mediapy import read_video, show_video
 from scipy.signal import convolve2d
 from square_video import *
 
@@ -395,133 +395,233 @@ def get_video_shifts(video: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndar
     return x_shifts, y_shifts, th_shifts
 
 
-def get_transform_matrix(dx: float, dy: float, dtheta: float) -> np.ndarray:
-    """
-    Creates a 3x3 Euclidean transformation matrix.
-    """
-    # Convert degrees to radians
-    theta_rad = np.radians(dtheta)
-    c, s = np.cos(theta_rad), np.sin(theta_rad)
+def get_panorama_matrices(dx, dy, dtheta, h, w):
+    transforms = []
+    cx, cy = w / 2.0, h / 2.0
 
-    # Standard Euclidean Matrix
-    M = np.eye(3)
-    M[0, 0] = c
-    M[0, 1] = -s
-    M[0, 2] = dx
-    M[1, 0] = s
-    M[1, 1] = c
-    M[1, 2] = dy
+    for i in range(len(dx)):
+        # 1. Reverse Rotation (Frame i+1 -> i)
+        M_rot = cv2.getRotationMatrix2D((cx, cy), -dtheta[i], 1.0)
+        M_rot = np.vstack([M_rot, [0, 0, 1]])
 
-    return M
+        # 2. Reverse Translation (Frame i+1 -> i)
+        M_trans = np.eye(3)
+        M_trans[0, 2] = -dx[i]
+        M_trans[1, 2] = -dy[i]
 
-
-def get_centered_cumulative_transforms(dx: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> List[np.ndarray]:
-    """
-    Computes cumulative transforms anchored to the MIDDLE frame.
-    """
-    num_frames = len(dx)
-    center_idx = num_frames // 2
-
-    transforms = [None] * num_frames
-    transforms[center_idx] = np.eye(3)
-
-    # Forward Pass (Center -> End)
-    current_T = np.eye(3)
-    for i in range(center_idx + 1, num_frames):
-        # FIX: We use NEGATIVE shifts because LK returns image motion,
-        # but we want to place the NEXT frame relative to the CURRENT one.
-        # If image moves Left (negative u), Camera moved Right (positive x).
-        # Therefore, we subtract the LK shift.
-        M_local = get_transform_matrix(-dx[i], -dy[i], -dtheta[i])
-
-        current_T = current_T @ M_local
-        transforms[i] = current_T
-
-    # Backward Pass (Center -> Start)
-    current_T = np.eye(3)
-    for i in range(center_idx, 0, -1):
-        # For moving backwards, we normally invert the forward transform.
-        # Since Forward = -Shift, Backward = -(-Shift) = +Shift.
-        M_local = get_transform_matrix(dx[i], dy[i], dtheta[i])
-
-        current_T = current_T @ M_local
-        transforms[i - 1] = current_T
+        transforms.append(M_trans @ M_rot)
 
     return transforms
 
 
-def create_panorama(video: np.ndarray, video_shifts: np.ndarray = None) -> np.ndarray:
-    if len(video) == 0:
-        return np.zeros((0, 0), dtype=video.dtype)
+def align_to_middle_frame(frames, motion_matrices):
+    """
+    Aligns all frames to the coordinate system of the middle frame.
 
-    h, w = video.shape[1], video.shape[2]
+    Args:
+        frames: List of images.
+        motion_matrices: List where motion_matrices[i] transforms frame[i+1] to frame[i].
+                         Length must be len(frames) - 1.
+    """
+    num_frames = len(frames)
+    mid_idx = num_frames // 2
 
-    if video_shifts is not None:
-        dx, dy, dtheta = video_shifts
-    else:
-        dx, dy, dtheta = get_video_shifts(video)
+    # Initialize list of global transforms (one per frame)
+    # We fill it with None first to assign by index
+    global_transforms = [None] * num_frames
 
-    # 1. Compute Transforms (with corrected signs)
-    transforms = get_centered_cumulative_transforms(dx, dy, dtheta)
+    # The middle frame is our anchor (Identity)
+    global_transforms[mid_idx] = np.eye(3)
 
-    # 2. Calculate Canvas Bounds
-    corners = np.array([
-        [0, 0, 1],
-        [w, 0, 1],
-        [w, h, 1],
-        [0, h, 1]
-    ]).T
+    # 1. Chain BACKWARDS from Middle to Start (0)
+    # motion_matrices[i] is transform for frame[i+1] -> frame[i]
+    # To go from i -> i+1 (which is moving towards the middle anchor), we need Inverse.
+    current_transform = np.eye(3)
 
-    all_x, all_y = [], []
-    for T in transforms:
-        warped_corners = T @ corners
-        all_x.extend(warped_corners[0, :])
-        all_y.extend(warped_corners[1, :])
+    for i in range(mid_idx - 1, -1, -1):
+        # We want transform: Frame i -> Middle
+        # We have motion M: Frame i+1 -> Frame i
+        # We know T: Frame i+1 -> Middle
+        # Therefore: T_new = T * M_inverse
 
-    min_x, max_x = min(all_x), max(all_x)
-    min_y, max_y = min(all_y), max(all_y)
+        M = motion_matrices[i]
+        M_inv = np.linalg.inv(M)
 
-    pano_w = int(np.ceil(max_x - min_x))
-    pano_h = int(np.ceil(max_y - min_y))
+        current_transform = current_transform @ M_inv
+        global_transforms[i] = current_transform
 
-    # 3. Allocate Canvas
-    if video.ndim == 3:
-        panorama = np.zeros((pano_h, pano_w), dtype=video.dtype)
-    else:
-        panorama = np.zeros((pano_h, pano_w, video.shape[3]), dtype=video.dtype)
+    # 2. Chain FORWARDS from Middle to End
+    current_transform = np.eye(3)
 
-    # 4. Paste Frames
-    T_global_shift = np.eye(3)
-    T_global_shift[0, 2] = -min_x
-    T_global_shift[1, 2] = -min_y
+    for i in range(mid_idx, num_frames - 1):
+        # We want transform: Frame i+1 -> Middle
+        # We have motion M: Frame i+1 -> Frame i
+        # We know T: Frame i -> Middle
+        # Therefore: T_new = T * M
 
-    for i, frame in enumerate(video):
-        T_frame_to_global = transforms[i]
-        M_final = T_global_shift @ T_frame_to_global
+        M = motion_matrices[i]
 
-        warped_frame = cv2.warpAffine(
+        current_transform = current_transform @ M
+        global_transforms[i + 1] = current_transform
+
+    # --- From here, the warping logic is identical to the previous version ---
+
+    # 3. Calculate Canvas Size (Bounding Box)
+    h, w = frames[0].shape[:2]
+    corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
+    all_corners = []
+
+    for H in global_transforms:
+        warped_corners = cv2.perspectiveTransform(corners, H)
+        all_corners.append(warped_corners)
+
+    all_corners = np.concatenate(all_corners, axis=0)
+
+    [x_min, y_min] = all_corners.min(axis=0).ravel()
+    [x_max, y_max] = all_corners.max(axis=0).ravel()
+
+    translation_dist = [-x_min, -y_min]
+
+    H_translation = np.array([
+        [1, 0, translation_dist[0]],
+        [0, 1, translation_dist[1]],
+        [0, 0, 1]
+    ])
+
+    # 4. Warp Images
+    warped_frames = []
+    output_width = int(x_max - x_min)
+    output_height = int(y_max - y_min)
+
+    for i, frame in enumerate(frames):
+        H_final = H_translation @ global_transforms[i]
+
+        warped = cv2.warpPerspective(
             frame,
-            M_final[:2, :],
-            (pano_w, pano_h),
+            H_final,
+            (output_width, output_height),
             flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_TRANSPARENT
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0
+        )
+        warped_frames.append(warped)
+
+    return np.array(warped_frames), (output_height, output_width)
+
+
+def strip_stitching_with_rotation(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> np.ndarray:
+    """
+    1. Rotates each frame to make the horizon flat (stabilization).
+    2. Cuts a vertical strip.
+    3. Pastes it onto the canvas.
+    """
+    h, w = frames[0].shape[:2]
+    num_frames = len(frames)
+    center_x, center_y = w // 2, h // 2
+
+    # 1. Calculate Canvas Size
+    total_dx = int(np.sum(np.abs(dx)))
+    # We add extra height padding because rotation might push pixels up/down
+    canvas_w = total_dx + w
+    canvas_h = h + int(np.sum(np.abs(dy))) + 200
+
+    panorama = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+
+    current_x = 0
+    current_y = int(np.sum(np.abs(dy))) // 2 + 100  # Start with buffer
+
+    # Track the absolute angle of the camera (cumulative rotation)
+    current_angle = 0.0
+
+    for i in range(num_frames - 1):
+        # Update camera angle
+        current_angle += dtheta[i + 1]
+
+        # 1. ROTATE the frame to cancel the camera's roll
+        # If camera rotated +2 degrees, we rotate image -2 degrees to level it.
+        M_rot = cv2.getRotationMatrix2D((center_x, center_y), -current_angle, 1.0)
+
+        # We rotate the specific frame before cutting
+        rotated_frame = cv2.warpAffine(
+            frames[i],
+            M_rot,
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0)
         )
 
-        if warped_frame.ndim == 3:
-            mask = np.any(warped_frame > 0, axis=2)
+        # 2. Determine Strip Width
+        shift_x = int(round(abs(dx[i + 1])))
+        if shift_x <= 0:
+            width_of_strip = 1
         else:
-            mask = (warped_frame > 0)
+            width_of_strip = shift_x
 
-        panorama[mask] = warped_frame[mask]
+        # 3. Cut Strip from the ROTATED frame
+        strip = rotated_frame[:, center_x: center_x + width_of_strip, :]
 
-    return panorama
+        # 4. Calculate Placement (Paste)
+        shift_y = int(round(dy[i + 1]))
+
+        # Update vertical position (compensate for vertical shake)
+        # Note: We subtract dy because if camera moves UP, we paste DOWN.
+        current_y -= shift_y
+
+        start_y = current_y
+        end_y = start_y + h
+
+        # Safety bounds
+        if start_y < 0: start_y = 0
+        if end_y > canvas_h: end_y = canvas_h
+
+        strip_h = end_y - start_y
+        if strip_h > 0:
+            # Handle cases where the strip height exceeds canvas or frame bounds slightly
+            paste_strip = strip[:strip_h, :, :]
+
+            # If we hit the bottom of canvas, clip the strip
+            if paste_strip.shape[0] > (canvas_h - start_y):
+                paste_strip = paste_strip[:(canvas_h - start_y), :, :]
+
+            panorama[start_y: start_y + paste_strip.shape[0],
+            current_x: current_x + width_of_strip, :] = paste_strip
+
+        current_x += width_of_strip
+
+    # Crop black finish
+    return panorama[:, :current_x, :]
+
+
 
 boat_x = 0,0.00000,-7.00000,-5.00000,-4.00000,-3.00000,-3.00000,-4.00000,-3.00000,-3.00000,-4.00000,-4.00000,-3.00000,-2.00000,-3.00000,-4.00000,-4.00000,-2.00000,-4.00000,-2.00000,-4.00000,-4.00000,-3.00000,-3.00000,-5.00000,-4.00000,-4.00000,-4.00000,-3.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-3.00000,-4.00000,-3.00000,-4.00000,-4.00000,-5.00000,-4.00000,-3.00000,-4.00000,-3.00000,-4.00000,-3.00000,-4.00000,-4.00000,-5.00000,-4.00000,-5.00000,-3.00000,-3.00000,-2.00000,-5.00000,-3.00000,-5.00000,-3.00000,-2.00000,-3.00000,-2.00000,0.00000,-3.00000,-3.00000,-3.00000,-3.00000,-4.00000,-4.00000,-5.00000,-5.00000,-6.00000,-6.00000,-3.00000,-4.00000,-4.00000,-3.00000,-3.00000,-4.00000,-2.00000,-4.00000,-3.00000,-4.00000,-3.00000,-3.00000,-4.00000,-4.00000,-4.00000,-5.00000,-5.00000,-6.00000,-4.00000,-2.00000,-4.00000,-4.00000,-4.00000,-4.00000,-3.00000,-5.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-5.00000,-4.00000,-5.00000,-5.00000,-4.00000,-4.00000,-4.00000,-4.00000,-4.00000,-5.00000,-4.00000,-3.00000,-4.00000,-5.00000,-3.00000,-3.00000,-3.00000,-5.00000,-5.00000,-5.00000,-3.00000,-5.00000,-4.00000,-5.00000,-5.00000,-4.00000,-6.00000,-7.00000,-5.00000,-5.00000,-5.00000,-3.00000,-3.00000,-2.00000,-3.00000,-3.00000,-3.00000,-5.00000,-3.00000,-6.00000,-4.00000,-4.00000,-5.00000,-6.00000,-4.00000,-4.00000,-4.00000,-6.00000,-3.00000,-4.00000,-4.00000,-4.00000,-5.00000,-6.00000,-4.00000,-6.00000,-6.00000,-6.00000,-4.00000,-5.00000,-4.00000,-2.00000,-3.00000,-3.00000,-4.00000,-4.00000,-5.00000,-5.00000,-3.00000,-6.00000,-5.00000,-6.00000,-4.00000,-4.00000,-4.00000,-4.00000,-5.00000,-3.00000,-5.00000,-4.00000,-4.00000,-6.00000,-4.00000,-5.00000,-6.00000,-4.00000,-5.00000,-5.00000,-3.00000,-4.00000,-4.00000,-5.00000,-3.00000,-7.00000,-3.00000,-4.00000,-1.00000,-4.00000,-4.00000,-4.00000,-4.00000,-6.00000,-4.00000,-5.00000,-3.00000,-3.00000,-4.00000,-4.00000,-5.00000,-5.00000,-4.00000,-4.00000,-5.00000,-5.00000,-5.00000,-4.00000,-3.00000,-4.00000,-4.00000,-3.00000,-4.00000,-5.00000,-6.00000,-6.00000,-6.00000,-4.00000,-3.00000,-4.00000,-6.00000,-2.00000,-4.00000,-4.00000,-4.00000,-6.00000,-5.00000,-5.00000,-5.00000,-6.00000,-6.00000,-4.00000,-5.00000,-5.00000,-5.00000,-6.00000,-6.00000,-6.00000,-6.00000,-7.00000,-7.00000,-6.00000,-7.00000,-8.00000,-7.00000,-6.00000,-6.00000,-8.00000,-7.00000,-6.00000,-7.00000,-6.00000,-8.00000,-7.00000,-7.00000,-6.00000,-7.00000,-7.00000,-6.00000,-7.00000,-7.00000,-7.00000,-6.00000,-6.00000,-6.00000,-6.00000,-6.00000,-6.00000,-6.00000,-6.00000,-6.00000,-5.00000,-4.00000,-5.00000,-4.00000,-7.00000,-5.00000,-5.00000,-6.00000,-6.00000,-6.00000,-6.00000,-7.00000,-6.00000,-5.00000,-6.00000,-6.00000,-3.00000,-6.00000,-7.00000,-8.00000,-7.00000,-7.00000,-7.00000,-6.00000,-7.00000,-5.00000,-5.00000,-7.00000,-6.00000,-6.00000,-6.00000,-7.00000,-7.00000,-7.00000,-7.00000,-7.00000,-8.00000,-7.00000,-7.00000,-5.00000,-7.00000,-6.00000,-7.00000,-6.00000,-7.00000,-7.00000,-7.00000,-7.00000,-7.00000,-6.00000,-5.00000,-5.00000,-5.00000,-6.00000,-4.00000,-5.00000,-5.00000,-6.00000,-9.00000,-6.00000,-10.00000,-8.00000,-8.00000,-7.00000,-7.00000,-7.00000,-7.00000,-5.00000,-10.00000,-7.00000,-9.00000,-9.00000,-10.00000,-8.00000,-9.00000,-6.00000,-7.00000,-8.00000,-10.00000,-7.00000,-9.00000,-9.00000,-9.00000,-9.00000,-11.00000,-8.00000,-10.00000,-8.00000,-10.00000,-9.00000,-9.00000,-9.00000,-8.00000,-10.00000,-9.00000,-9.00000,-9.00000,-9.00000,-10.00000,-10.00000,-8.00000,-8.00000,-9.00000,-6.00000,-8.00000,-6.00000,-7.00000,-8.00000,-9.00000,-8.00000,-9.00000,-8.00000,-7.00000,-7.00000,-7.00000,-6.00000,-4.00000,-5.00000,-8.00000,-7.00000,-7.00000,-7.00000,-8.00000,-7.00000,-6.00000,-8.00000,-6.00000,-7.00000,-7.00000,-6.00000,-7.00000,-8.00000,-7.00000,-7.00000,-7.00000,-8.00000,-6.00000,-8.00000,-7.00000,-8.00000,-6.00000,-9.00000,-7.00000,-7.00000,-7.00000,-5.00000,-7.00000,-7.00000,-6.00000,-6.00000,-6.00000,-8.00000,-7.00000,-7.00000,-8.00000,-8.00000,-8.00000,-7.00000,-7.00000,-7.00000,-8.00000,-6.00000,-7.00000,-7.00000,-8.00000
 boat_y = 1,0.00000,-2.00000,0.00000,0.00000,-3.00000,-2.00000,-1.00000,1.00000,1.00000,0.00000,0.00000,-1.00000,0.00000,0.00000,0.00000,1.00000,0.00000,1.00000,2.00000,0.00000,-1.00000,-1.00000,1.00000,0.00000,0.00000,0.00000,1.00000,1.00000,1.00000,1.00000,2.00000,1.00000,0.00000,-2.00000,0.00000,0.00000,0.00000,0.00000,1.00000,0.00000,0.00000,0.00000,1.00000,1.00000,0.00000,2.00000,2.00000,2.00000,3.00000,1.00000,1.00000,-1.00000,-1.00000,1.00000,0.00000,0.00000,1.00000,2.00000,2.00000,1.00000,0.00000,-2.00000,-1.00000,0.00000,-1.00000,-3.00000,-3.00000,-1.00000,-1.00000,-2.00000,-2.00000,-2.00000,-3.00000,-3.00000,-2.00000,-1.00000,-2.00000,-2.00000,-2.00000,-1.00000,-1.00000,0.00000,1.00000,2.00000,2.00000,1.00000,0.00000,0.00000,1.00000,2.00000,1.00000,0.00000,1.00000,2.00000,1.00000,-1.00000,0.00000,0.00000,-2.00000,-2.00000,0.00000,1.00000,0.00000,0.00000,0.00000,2.00000,1.00000,0.00000,1.00000,0.00000,0.00000,0.00000,-1.00000,-2.00000,-2.00000,0.00000,0.00000,-1.00000,1.00000,2.00000,1.00000,2.00000,1.00000,-1.00000,0.00000,1.00000,0.00000,0.00000,1.00000,1.00000,-1.00000,-1.00000,-1.00000,1.00000,1.00000,0.00000,-2.00000,-2.00000,-1.00000,0.00000,1.00000,1.00000,1.00000,0.00000,-1.00000,0.00000,0.00000,-1.00000,-2.00000,-1.00000,-1.00000,-1.00000,-1.00000,0.00000,1.00000,-1.00000,-2.00000,-1.00000,0.00000,0.00000,-1.00000,-1.00000,1.00000,1.00000,0.00000,-1.00000,1.00000,2.00000,2.00000,1.00000,1.00000,1.00000,3.00000,1.00000,-3.00000,-2.00000,1.00000,1.00000,-1.00000,0.00000,1.00000,1.00000,-1.00000,-1.00000,-1.00000,-1.00000,-2.00000,-1.00000,0.00000,1.00000,1.00000,1.00000,0.00000,0.00000,-1.00000,-2.00000,-2.00000,-2.00000,-1.00000,-2.00000,-2.00000,1.00000,3.00000,2.00000,-1.00000,-1.00000,2.00000,1.00000,-1.00000,1.00000,2.00000,0.00000,-2.00000,-3.00000,-1.00000,0.00000,-2.00000,1.00000,4.00000,2.00000,1.00000,-1.00000,0.00000,0.00000,-1.00000,-5.00000,-4.00000,-2.00000,-3.00000,-4.00000,-2.00000,-1.00000,0.00000,0.00000,1.00000,0.00000,2.00000,1.00000,-1.00000,-1.00000,0.00000,-2.00000,-2.00000,-1.00000,1.00000,0.00000,-1.00000,0.00000,2.00000,2.00000,-1.00000,-1.00000,2.00000,1.00000,-1.00000,-2.00000,2.00000,2.00000,0.00000,1.00000,1.00000,1.00000,0.00000,0.00000,0.00000,-2.00000,-2.00000,-1.00000,-2.00000,-1.00000,1.00000,0.00000,0.00000,0.00000,1.00000,0.00000,1.00000,2.00000,0.00000,0.00000,0.00000,-1.00000,-1.00000,-2.00000,-2.00000,-3.00000,-1.00000,0.00000,1.00000,0.00000,0.00000,1.00000,1.00000,0.00000,0.00000,1.00000,1.00000,1.00000,2.00000,1.00000,0.00000,-1.00000,-1.00000,-1.00000,-3.00000,-2.00000,0.00000,0.00000,-1.00000,-2.00000,-1.00000,1.00000,0.00000,-1.00000,0.00000,0.00000,1.00000,0.00000,1.00000,1.00000,2.00000,0.00000,-1.00000,1.00000,0.00000,-2.00000,-3.00000,-1.00000,0.00000,-1.00000,0.00000,1.00000,1.00000,0.00000,0.00000,0.00000,0.00000,0.00000,-1.00000,-3.00000,0.00000,2.00000,0.00000,0.00000,-1.00000,1.00000,3.00000,2.00000,0.00000,1.00000,2.00000,2.00000,1.00000,0.00000,-3.00000,-4.00000,-2.00000,-1.00000,-2.00000,-3.00000,-1.00000,0.00000,-1.00000,-1.00000,-1.00000,1.00000,0.00000,0.00000,0.00000,-1.00000,0.00000,0.00000,0.00000,-1.00000,-1.00000,-1.00000,0.00000,-1.00000,-1.00000,-1.00000,-1.00000,0.00000,0.00000,0.00000,-1.00000,1.00000,1.00000,0.00000,0.00000,1.00000,1.00000,2.00000,0.00000,-1.00000,0.00000,0.00000,0.00000,1.00000,1.00000,1.00000,1.00000,0.00000,1.00000,1.00000,-1.00000,-2.00000,-1.00000,0.00000,-3.00000,-2.00000,0.00000,1.00000,2.00000,0.00000,-1.00000,1.00000,0.00000,-2.00000,0.00000,1.00000,0.00000,0.00000,1.00000,0.00000,-1.00000,1.00000,1.00000,0.00000,2.00000,1.00000,1.00000,2.00000,3.00000,1.00000,-1.00000,1.00000,1.00000,0.00000,0.00000,2.00000,3.00000,2.00000,-1.00000,0.00000,0.00000,0.00000,-1.00000,1.00000,1.00000,-1.00000
 boat_theta = 2,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000,0.00000
 boat_shifts = np.vstack((boat_x, boat_y, boat_theta))
 if __name__ == "__main__":
-    vid = mp.read_video(r"Exercise Inputs/boat.mp4")
-    # panoroma = create_panorama(vid, boat_shifts)
-    # show_image(panoroma)
-    show_image(vid[0])
+    video_path = "Exercise Inputs/boat.mp4"
+
+    if os.path.exists(video_path):
+        print("Loading video...")
+        boat_video = read_video(video_path)
+
+        h, w = boat_video.shape[1], boat_video.shape[2]
+
+        # 1. Tracking (Top Half Only - Houses)
+        roi_height = int(h * 0.6)
+        tracking_video = boat_video[:, :roi_height, :]
+
+        data = np.load("boat_shifts.npz")
+        dx, dy, dtheta = data['dx'], data['dy'], data['dtheta']
+
+        # 2. Stitching with Rotation Correction
+        print("Stitching with Rotation...")
+        panorama = strip_stitching_with_rotation(boat_video, dx, dy, dtheta)
+
+        plt.figure(figsize=(15, 6))
+        plt.title("Boat Panorama (De-Rotated Strips)")
+        plt.imshow(panorama)
+        plt.axis('off')
+        plt.show()
+
+        plt.imsave("strip_panorama_rotated.png", panorama)

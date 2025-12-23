@@ -124,6 +124,45 @@ def create_rotated_square_video(num_frames: int, start_loc: Tuple[int, int], ang
     return np.array(frames)
 
 
+def create_rotated_and_moved_square_video(num_frames: int, start_loc: Tuple[int, int],
+                                          shift: Tuple[int, int], angle_per_frame: float,
+                                          size: int, save_path: str = None) -> np.ndarray:
+    frames = []
+    start_x, start_y = start_loc
+    shift_x, shift_y = shift
+
+    # Center of rotation (Image Center)
+    center = (FRAME_WIDTH // 2, FRAME_HEIGHT // 2)
+
+    for i in range(num_frames):
+        current_x = start_x + (i * shift_x)
+        current_y = start_y + (i * shift_y)
+
+        temp_frame = create_square_frame(size=size, upper_left_loc=(current_x, current_y))
+
+        current_angle = i * angle_per_frame
+        M = cv2.getRotationMatrix2D(center, current_angle, 1.0)
+
+        rotated_frame = cv2.warpAffine(
+            temp_frame,
+            M,
+            (FRAME_WIDTH, FRAME_HEIGHT),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=BG_COLOR
+        )
+
+        frames.append(rotated_frame)
+
+    frames = np.array(frames)
+
+    if save_path:
+        # FIX: Pass 'frames' (the video data), NOT 'num_frames' (the integer count)
+        save_video(frames, save_path + ".mp4")
+
+    return frames
+
+
 # --- Helper for viewing ---
 def play_video(video_ndarray: np.ndarray) -> None:
     if video_ndarray.size == 0:
@@ -140,7 +179,7 @@ def save_video(frames: list, filename: str) -> None:
     """
     Saves a list of frames (or numpy array) to an MP4 file.
     """
-    if not frames:
+    if len(frames) == 0:
         return
 
     # Get dimensions from the first frame
