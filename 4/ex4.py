@@ -9,9 +9,10 @@ from mediapy import read_video, show_video
 from scipy.signal import convolve2d
 from square_video import *
 
-PYRAMID_LEVELS = 5
-FILTER_SIZE = 3
-ITERATIONS_PER_LEVEL = 10
+PYRAMID_LEVELS = 6
+FILTER_SIZE = 5
+ITERATIONS_PER_LEVEL = 30
+ITERATION_ROTATION = 10
 
 def show_image(img, save_path=None):
     plt.figure()
@@ -224,10 +225,6 @@ def find_rotation_angle(I1: np.ndarray, I2: np.ndarray) -> int:
     Uses a Pyramid and Joint Solver (u, v, theta) to robustly distinguish
     true rotation from large translations.
     """
-    # Configuration
-    PYRAMID_LEVELS = 3
-    FILTER_SIZE = 3
-    ITERATIONS = 10
 
     # Build Pyramids
     pyr1 = build_gaussian_pyramid(I1, PYRAMID_LEVELS, FILTER_SIZE)
@@ -252,7 +249,7 @@ def find_rotation_angle(I1: np.ndarray, I2: np.ndarray) -> int:
         x_grid = x_grid.astype(np.float32) - cx
         y_grid = y_grid.astype(np.float32) - cy
 
-        for _ in range(ITERATIONS):
+        for _ in range(ITERATION_ROTATION):
             # 1. Construct Matrix (Rotate then Translate)
             M = cv2.getRotationMatrix2D((cx, cy), theta, 1.0)
             M[0, 2] -= u
@@ -364,6 +361,78 @@ def lucas_kanade(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[int, int, int]
     u, v = lk_for_x_y(I1, I2_aligned)
 
     return int(u), int(v), int(round(theta))
+
+
+def align_frames(video: np.ndarray, shifts_path: str = None):
+    """
+    Step 2: Stabilize Rotations & Y translations.
+    Returns a video where the only motion left is horizontal (X).
+    """
+    h, w = video.shape[1], video.shape[2]
+    num_frames = video.shape[0]
+
+    # 1. Load or Calculate Shifts
+    if shifts_path:
+        data = np.load(shifts_path)
+        dx, dy, dtheta = data['dx'], data['dy'], data['dtheta']
+    else:
+        dx, dy, dtheta = get_video_shifts(video)  # Assumes this function is defined
+        # Optional: Save them for next time
+        # np.savez("calculated_shifts.npz", dx=dx, dy=dy, dtheta=dtheta)
+
+    # 2. Calculate "Tall" Canvas Height
+    # We need enough vertical space so the frames don't go out of bounds when we shift them up/down.
+    total_dy = int(np.sum(np.abs(dy)))
+    aligned_h = h + total_dy + 200  # +200 buffer
+
+    # 3. Initialize Loop Variables
+    # Start placing frames in the middle of the new tall canvas
+    current_y = total_dy // 2 + 100
+    current_angle = 0.0
+
+    # We rotate around the original image center
+    center_x, center_y = w // 2, h // 2
+
+    aligned_frames = []
+    for i in range(num_frames):
+        frame = video[i]
+
+        # --- A. Build Transformation Matrix ---
+
+        # 1. Rotation Matrix (around center)
+        # Note: We negate current_angle to stabilize (counter-act the motion)
+        M = cv2.getRotationMatrix2D((center_x, center_y), -current_angle, 1.0)
+
+        # 2. Add Vertical Translation (Stabilize Y)
+        # The rotation matrix is 2x3: [[cos, -sin, tx], [sin, cos, ty]]
+        # We need to shift the image so it lands at 'current_y' in the new tall canvas.
+        # Currently, the center of the image is at h//2.
+        # We want it to be at 'current_y'.
+        # So shift = current_y - (h // 2)
+        y_shift = current_y - (h // 2)
+
+        # Add this shift to the translation component (row 1, col 2)
+        M[1, 2] += y_shift
+
+        # --- B. Warp Frame ---
+        # Apply the transform. The output size is (w, aligned_h).
+        warped_frame = cv2.warpAffine(
+            frame,
+            M,
+            (w, aligned_h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0)
+        )
+
+        aligned_frames.append(warped_frame)
+
+        # --- C. Update Accumulators for NEXT frame ---
+        if i < num_frames - 1:
+            current_angle += dtheta[i + 1]
+            current_y -= int(round(dy[i + 1]))
+
+    return np.array(aligned_frames), dx
 
 
 def create_empty_panorama(video: np.ndarray) -> np.ndarray:
@@ -509,131 +578,176 @@ def align_to_middle_frame(frames, motion_matrices):
     return np.array(warped_frames), (output_height, output_width)
 
 
-def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: np.ndarray, k:int) -> np.ndarray:
+def stabilize_video(frames: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> np.ndarray:
     """
-    Creates a strip panorama, but fills the start and end with the
-    full sides of the first and last frames.
+    Phase 1: Aligns all frames to a common coordinate system (Stabilization).
+    Implements step 2: "Stabilize Rotations & Y translations".
+    Returns a 'tall' video where the horizon is stable.
     """
     h, w = frames[0].shape[:2]
     num_frames = len(frames)
-    prespective_col, center_y = k, h // 2
 
-    # 1. Calculate Canvas Size
-    total_dx = int(np.sum(np.abs(dx)))
-    # Ensure canvas is wide enough for the full first frame + all movement + full last frame
-    canvas_w = total_dx + w
-    canvas_h = h + int(np.sum(np.abs(dy))) + 200
+    # 1. Calculate 'Tall' Canvas Height
+    # We need enough vertical space so frames don't leave the canvas when stabilized.
+    total_dy = int(np.sum(np.abs(dy)))
+    aligned_h = h + total_dy + 200  # generous buffer
 
-    panorama = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+    center_x, center_y = w // 2, h // 2
 
-    # Start writing at x=0 (The absolute left edge of the first frame)
-    current_x = 0
-
-    # Start Y with buffer
-    current_y = int(np.sum(np.abs(dy))) // 2 + 100
-
-    # Accumulators
+    # Start placing frames in the middle of the tall canvas
+    current_y = aligned_h // 2
     current_angle = 0.0
 
-    for i in range(num_frames - 1):
-        # 1. Rotate the frame to stabilize horizon
-        # Note: We rotate FIRST, then update the angle for the next frame.
-        # This ensures Frame 0 is treated as the anchor (Rotation 0).
-        M_rot = cv2.getRotationMatrix2D((prespective_col, center_y), -current_angle, 1.0)
+    stabilized_frames = []
 
-        rotated_frame = cv2.warpAffine(
+    print("Phase 1: Stabilizing video...")
+    for i in range(num_frames):
+        if i == 268:
+            pass
+        # --- Build Transformation Matrix ---
+        # 1. Rotation (Inverse of accumulated angle)
+        M = cv2.getRotationMatrix2D((center_x, center_y), -current_angle, 1.0)
+
+        # 2. Vertical Translation (Stabilize Y)
+        # Shift so the image center (h//2) lands at the stabilized Y position (current_y)
+        y_shift = current_y - (h // 2)
+        M[1, 2] += y_shift
+
+        # --- Warp ---
+        warped_frame = cv2.warpAffine(
             frames[i],
-            M_rot,
-            (w, h),
+            M,
+            (w, aligned_h),
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0,0,0)
+            borderValue=(0, 0, 0)
         )
+        stabilized_frames.append(warped_frame)
 
-        # 2. Determine Strip Width (Motion to next frame)
-        shift_x = int(round(abs(dx[i+1])))
-        strip_width = max(1, shift_x)
+        # --- Update Accumulators for NEXT frame ---
+        if i < num_frames - 1:
+            current_angle += dtheta[i + 1]
+            current_y -= int(round(dy[i + 1]))
 
-        # --- THE NEW FEATURE: FILL LOGIC ---
-        if i == 0:
-            # FIRST FRAME: Take everything from Left Edge (0) to the end of the strip
-            col_start = 0
-            col_end = prespective_col + strip_width
-        else:
-            # MIDDLE FRAMES: Standard Center Strip
-            col_start = prespective_col
-            col_end = prespective_col + strip_width
+    return np.array(stabilized_frames)
 
-        # 3. Cut & Paste
-        strip = rotated_frame[:, col_start : col_end, :]
-        paste_width = strip.shape[1]
 
-        # Calculate Y placement
-        start_y = current_y
-        end_y = start_y + h
+def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: np.ndarray, k: int) -> np.ndarray:
+    """
+    Phase 2: Stitching without manual stretch factor.
+    Relies on accurate dx values from improved Lucas-Kanade.
+    """
+    h, w = frames[0].shape[:2]
 
-        if start_y < 0: start_y = 0
-        if end_y > canvas_h: end_y = canvas_h
+    # --- PHASE 1: ALIGNMENT ---
+    stabilized_video = stabilize_video(frames, dy, dtheta)
+    stab_h, stab_w = stabilized_video[0].shape[:2]
 
-        strip_h = end_y - start_y
-        if strip_h > 0:
-             p_strip = strip[:strip_h, :, :]
-             # Paste into panorama
-             panorama[start_y : start_y + p_strip.shape[0], current_x : current_x + paste_width, :] = p_strip
+    # --- PHASE 2: STITCHING ---
+    # Calculate canvas width based on raw motion (no stretch factor)
+    total_dx = np.sum(np.abs(dx))
+    canvas_w = int(total_dx) + w + 500
 
-        # Advance X Cursor
-        current_x += paste_width
+    panorama = np.zeros((stab_h, canvas_w, 3), dtype=np.uint8)
+    current_x = 0
 
-        # Update Accumulators for the NEXT frame
-        current_y -= int(round(dy[i+1]))
-        current_angle += dtheta[i+1]
+    # Ideally use the center column to minimize perspective distortion
+    prespective_col = np.clip(k, 0, w - 1)
 
-    # --- END FILL (LAST FRAME) ---
-    # We are now at the last frame index. We need to fill the "Right Wing".
-    last_idx = num_frames - 1
+    print(f"Phase 2: Stitching strips from column {k}...")
 
-    # Rotate the last frame using the final accumulated angle
-    M_rot = cv2.getRotationMatrix2D((prespective_col, center_y), -current_angle, 1.0)
-    rotated_last = cv2.warpAffine(frames[last_idx], M_rot, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0))
+    for i in range(len(frames) - 1):
+        frame = stabilized_video[i]
 
-    # Take from Center to the absolute Right Edge
-    end_chunk = rotated_last[:, prespective_col : w, :]
+        # 1. Get raw movement
+        move_x = abs(dx[i + 1])
 
-    # Paste
-    start_y = current_y
-    end_y = start_y + h
-    strip_h = end_y - start_y
+        # 2. SKIP DUPLICATE FRAMES
+        # Even with perfect LK, the video still has duplicate frames where motion is 0.
+        if move_x < 0.5:
+            continue
 
-    if strip_h > 0:
-        p_chunk = end_chunk[:strip_h, :, :]
-        # Check if we fit in canvas width
-        if current_x + p_chunk.shape[1] <= canvas_w:
-            panorama[start_y : start_y + p_chunk.shape[0], current_x : current_x + p_chunk.shape[1], :] = p_chunk
-            current_x += p_chunk.shape[1]
+        # 3. Calculate Strip Width
+        # We rely strictly on the integer rounded value of the detected motion
+        strip_width = int(round(move_x))
 
-    # Crop unused canvas space
-    return panorama[:, :current_x, :]
+        if strip_width <= 0:
+            continue
+
+        # 4. Define Boundaries
+        col_end_target = prespective_col + strip_width
+
+        # Safety check: ensure we don't read past the image edge
+        col_end_actual = min(col_end_target, stab_w)
+
+        actual_width = col_end_actual - prespective_col
+
+        if actual_width <= 0:
+            continue
+
+        # 5. Paste
+        if current_x + actual_width > canvas_w:
+            break
+
+        strip = frame[:, prespective_col: col_end_actual, :]
+        panorama[:, current_x: current_x + actual_width, :] = strip
+
+        # Advance cursor by the actual amount we managed to paste
+        current_x += actual_width
+
+    # --- FINAL CROP ---
+    print("Cropping...")
+    mask = panorama.max(axis=2) > 0
+    rows, cols = np.where(mask)
+    if len(rows) > 0:
+        return panorama[np.min(rows): np.max(rows) + 1, np.min(cols): np.max(cols) + 1, :]
+    return panorama
+
 
 def create_panorama(video_path:str, k:int ,shifts_path:str=None) -> np.ndarray:
-    video = read_video(video_path)
-    h, w = video.shape[1], video.shape[2]
+    video = read_video(video_path)[:-1]
     if shifts_path:
         data = np.load(shifts_path)
         dx, dy, dtheta = data['dx'], data['dy'], data['dtheta']
-        np.savez("calculated_shifts.npz", dx=dx, dy=dy, dtheta=dtheta)
     else:
         dx, dy, dtheta = get_video_shifts(video)
     return strip_stitching(video, dx, dy, dtheta, k)
 
+def main_save_shifts():
+    paths = os.listdir("Exercise Inputs")
+    for path in paths:
+        if f"{path}_shifts.npz" not in os.listdir():
+            video_path = os.path.join("Exercise Inputs", path)
+            dx, dy, dtheta = get_video_shifts(read_video(video_path))
+            np.savez(f"{path}_shifts.npz", dx=dx, dy=dy, dtheta=dtheta)
+
+def main_save_shift(names):
+    for name in names:
+        video_path = os.path.join("Exercise Inputs", name)
+        dx, dy, dtheta = get_video_shifts(read_video(video_path))
+        np.savez(f"{name}_shifts.npz", dx=dx, dy=dy, dtheta=dtheta)
 
 
 
+def main_panorams():
+    ks = [50, 100, 150, 200, 250, 300, 350, 400]
+    for file_name in os.listdir("Exercise Inputs"):
+        for k in ks:
+            panorama = create_panorama("Exercise Inputs" + os.sep + file_name, k, f"{file_name}_shifts.npz")
+            show_image(panorama)
+
+
+def main_panorama(file_names: List[str] = None):
+    for file_name in file_names:
+        for k in ks:
+            panorama = create_panorama("Exercise Inputs" + os.sep + file_name, k, f"{file_name}_shifts.npz")
+            show_image(panorama)
+kessaria = "Kessaria.mp4"
+boat = "boat.mp4"
+garden = "Garden.mp4"
+house = "House.mp4"
+ks = [50, 100, 150, 200, 250, 300, 350, 400]
 if __name__ == "__main__":
-    video_path = "Exercise Inputs/boat.mp4"
-    shifts_path = "boat_shifts.npz"
-    ks = [100, 200, 300, 400, 500, 600]
-    for k in ks:
-        show_image(create_panorama(video_path, k=k, shifts_path=shifts_path))
-
-
+    panorama = create_panorama("Exercise Inputs" + os.sep + kessaria, 300, f"{kessaria}_cv.npz")
+    show_image(panorama)
 
