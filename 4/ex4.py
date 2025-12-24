@@ -713,6 +713,45 @@ def create_panorama(video_path:str, k:int ,shifts_path:str=None) -> np.ndarray:
         dx, dy, dtheta = get_video_shifts(video)
     return strip_stitching(video, dx, dy, dtheta, k)
 
+
+def create_video_animation(video_path, ks, shifts_path=None):
+    panoramas = []
+
+    print("Generating panoramas...")
+    # 1. Generate all panoramas first
+    for k in ks:
+        print(f"Processing view k={k}...")
+        pano = create_panorama("Exercise Inputs" + os.sep + video_path, k, shifts_path)
+        panoramas.append(pano)
+
+    # 2. Find the minimum common dimensions
+    min_h = min(p.shape[0] for p in panoramas)
+    min_w = min(p.shape[1] for p in panoramas)
+
+    print(f"Common video size will be: {min_w}x{min_h}")
+
+    cropped_panos = []
+
+    # 3. Center-Crop all images to the minimum size
+    for p in panoramas:
+        h, w = p.shape[:2]
+
+        # Calculate crop offsets to center the image
+        start_y = (h - min_h) // 2
+        start_x = (w - min_w) // 2
+
+        # Perform the crop
+        crop = p[start_y: start_y + min_h, start_x: start_x + min_w, :]
+        cropped_panos.append(crop)
+
+    # 4. Stack into a video array (Frames, Height, Width, Channels)
+    video_array = np.stack(cropped_panos, axis=0)
+
+    # 5. Show/Save
+    # 2 FPS is usually good to see the perspective shift clearly
+    show_video(video_array, fps=2)
+    return video_array
+
 def main_save_shifts():
     paths = os.listdir("Exercise Inputs")
     for path in paths:
@@ -742,12 +781,20 @@ def main_panorama(file_names: List[str] = None):
         for k in ks:
             panorama = create_panorama("Exercise Inputs" + os.sep + file_name, k, f"{file_name}_shifts.npz")
             show_image(panorama)
+
+
 kessaria = "Kessaria.mp4"
 boat = "boat.mp4"
 garden = "Garden.mp4"
 house = "House.mp4"
-ks = [50, 100, 150, 200, 250, 300, 350, 400]
+iguazu = "Iguazu.mp4"
+shinkansen = "Shinkansen.mp4"
+trees = "Trees.mp4"
+boat_ks = [_ for _ in range(50, 420, 5)]
+iguazu_ks = [_ for _ in range(20, 470, 10)]
+
 if __name__ == "__main__":
-    panorama = create_panorama("Exercise Inputs" + os.sep + kessaria, 300, f"{kessaria}_cv.npz")
-    show_image(panorama)
+    video = create_video_animation(iguazu, iguazu_ks, f"{iguazu}_shifts.npz")
+    save_video(video, "iguazu_video.mp4")
+    play_video(video)
 

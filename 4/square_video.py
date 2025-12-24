@@ -175,7 +175,7 @@ def play_video(video_ndarray: np.ndarray) -> None:
             break
     cv2.destroyAllWindows()
 
-def save_video(frames: list, filename: str) -> None:
+def save_video(frames: np.ndarray, filename: str) -> None:
     """
     Saves a list of frames (or numpy array) to an MP4 file.
     """
