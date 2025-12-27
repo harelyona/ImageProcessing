@@ -215,7 +215,6 @@ def lk_for_x_y(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[int, int]:
             except np.linalg.LinAlgError:
                 break
 
-    # Return rounded integers
     return int(round(u)), int(round(v))
 
 
@@ -362,92 +361,6 @@ def lucas_kanade(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[int, int, int]
 
     return int(u), int(v), int(round(theta))
 
-
-def align_frames(video: np.ndarray, shifts_path: str = None):
-    """
-    Step 2: Stabilize Rotations & Y translations.
-    Returns a video where the only motion left is horizontal (X).
-    """
-    h, w = video.shape[1], video.shape[2]
-    num_frames = video.shape[0]
-
-    # 1. Load or Calculate Shifts
-    if shifts_path:
-        data = np.load(shifts_path)
-        dx, dy, dtheta = data['dx'], data['dy'], data['dtheta']
-    else:
-        dx, dy, dtheta = get_video_shifts(video)  # Assumes this function is defined
-        # Optional: Save them for next time
-        # np.savez("calculated_shifts.npz", dx=dx, dy=dy, dtheta=dtheta)
-
-    # 2. Calculate "Tall" Canvas Height
-    # We need enough vertical space so the frames don't go out of bounds when we shift them up/down.
-    total_dy = int(np.sum(np.abs(dy)))
-    aligned_h = h + total_dy + 200  # +200 buffer
-
-    # 3. Initialize Loop Variables
-    # Start placing frames in the middle of the new tall canvas
-    current_y = total_dy // 2 + 100
-    current_angle = 0.0
-
-    # We rotate around the original image center
-    center_x, center_y = w // 2, h // 2
-
-    aligned_frames = []
-    for i in range(num_frames):
-        frame = video[i]
-
-        # --- A. Build Transformation Matrix ---
-
-        # 1. Rotation Matrix (around center)
-        # Note: We negate current_angle to stabilize (counter-act the motion)
-        M = cv2.getRotationMatrix2D((center_x, center_y), -current_angle, 1.0)
-
-        # 2. Add Vertical Translation (Stabilize Y)
-        # The rotation matrix is 2x3: [[cos, -sin, tx], [sin, cos, ty]]
-        # We need to shift the image so it lands at 'current_y' in the new tall canvas.
-        # Currently, the center of the image is at h//2.
-        # We want it to be at 'current_y'.
-        # So shift = current_y - (h // 2)
-        y_shift = current_y - (h // 2)
-
-        # Add this shift to the translation component (row 1, col 2)
-        M[1, 2] += y_shift
-
-        # --- B. Warp Frame ---
-        # Apply the transform. The output size is (w, aligned_h).
-        warped_frame = cv2.warpAffine(
-            frame,
-            M,
-            (w, aligned_h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0)
-        )
-
-        aligned_frames.append(warped_frame)
-
-        # --- C. Update Accumulators for NEXT frame ---
-        if i < num_frames - 1:
-            current_angle += dtheta[i + 1]
-            current_y -= int(round(dy[i + 1]))
-
-    return np.array(aligned_frames), dx
-
-
-def create_empty_panorama(video: np.ndarray) -> np.ndarray:
-    """
-    Computes the size of the panorama needed to fit all frames based on the shifts.
-    Returns (min_x, max_x, min_y, max_y).
-    """
-    frame_hight, frame_width = video.shape[1], video.shape[2]
-    xshifts, yshifts, _ = get_video_shifts(video)
-    cum_xshifts = np.cumsum(xshifts)
-    cum_yshifts = np.cumsum(yshifts)
-    panorama_size = frame_hight + cum_xshifts[-1], frame_width + cum_yshifts[-1]
-    return np.zeros(panorama_size, dtype=video.dtype)
-
-
 def get_video_shifts(video: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Computes (dx, dy, dtheta) between consecutive frames using Lucas-Kanade.
@@ -462,120 +375,6 @@ def get_video_shifts(video: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndar
         x_shifts[i + 1], y_shifts[i + 1], th_shifts[i + 1] = lucas_kanade(video[i], video[i + 1])
 
     return x_shifts, y_shifts, th_shifts
-
-
-def get_panorama_matrices(dx, dy, dtheta, h, w):
-    transforms = []
-    cx, cy = w / 2.0, h / 2.0
-
-    for i in range(len(dx)):
-        # 1. Reverse Rotation (Frame i+1 -> i)
-        M_rot = cv2.getRotationMatrix2D((cx, cy), -dtheta[i], 1.0)
-        M_rot = np.vstack([M_rot, [0, 0, 1]])
-
-        # 2. Reverse Translation (Frame i+1 -> i)
-        M_trans = np.eye(3)
-        M_trans[0, 2] = -dx[i]
-        M_trans[1, 2] = -dy[i]
-
-        transforms.append(M_trans @ M_rot)
-
-    return transforms
-
-
-def align_to_middle_frame(frames, motion_matrices):
-    """
-    Aligns all frames to the coordinate system of the middle frame.
-
-    Args:
-        frames: List of images.
-        motion_matrices: List where motion_matrices[i] transforms frame[i+1] to frame[i].
-                         Length must be len(frames) - 1.
-    """
-    num_frames = len(frames)
-    mid_idx = num_frames // 2
-
-    # Initialize list of global transforms (one per frame)
-    # We fill it with None first to assign by index
-    global_transforms = [None] * num_frames
-
-    # The middle frame is our anchor (Identity)
-    global_transforms[mid_idx] = np.eye(3)
-
-    # 1. Chain BACKWARDS from Middle to Start (0)
-    # motion_matrices[i] is transform for frame[i+1] -> frame[i]
-    # To go from i -> i+1 (which is moving towards the middle anchor), we need Inverse.
-    current_transform = np.eye(3)
-
-    for i in range(mid_idx - 1, -1, -1):
-        # We want transform: Frame i -> Middle
-        # We have motion M: Frame i+1 -> Frame i
-        # We know T: Frame i+1 -> Middle
-        # Therefore: T_new = T * M_inverse
-
-        M = motion_matrices[i]
-        M_inv = np.linalg.inv(M)
-
-        current_transform = current_transform @ M_inv
-        global_transforms[i] = current_transform
-
-    # 2. Chain FORWARDS from Middle to End
-    current_transform = np.eye(3)
-
-    for i in range(mid_idx, num_frames - 1):
-        # We want transform: Frame i+1 -> Middle
-        # We have motion M: Frame i+1 -> Frame i
-        # We know T: Frame i -> Middle
-        # Therefore: T_new = T * M
-
-        M = motion_matrices[i]
-
-        current_transform = current_transform @ M
-        global_transforms[i + 1] = current_transform
-
-    # --- From here, the warping logic is identical to the previous version ---
-
-    # 3. Calculate Canvas Size (Bounding Box)
-    h, w = frames[0].shape[:2]
-    corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
-    all_corners = []
-
-    for H in global_transforms:
-        warped_corners = cv2.perspectiveTransform(corners, H)
-        all_corners.append(warped_corners)
-
-    all_corners = np.concatenate(all_corners, axis=0)
-
-    [x_min, y_min] = all_corners.min(axis=0).ravel()
-    [x_max, y_max] = all_corners.max(axis=0).ravel()
-
-    translation_dist = [-x_min, -y_min]
-
-    H_translation = np.array([
-        [1, 0, translation_dist[0]],
-        [0, 1, translation_dist[1]],
-        [0, 0, 1]
-    ])
-
-    # 4. Warp Images
-    warped_frames = []
-    output_width = int(x_max - x_min)
-    output_height = int(y_max - y_min)
-
-    for i, frame in enumerate(frames):
-        H_final = H_translation @ global_transforms[i]
-
-        warped = cv2.warpPerspective(
-            frame,
-            H_final,
-            (output_width, output_height),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0
-        )
-        warped_frames.append(warped)
-
-    return np.array(warped_frames), (output_height, output_width)
 
 
 def stabilize_video(frames: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> np.ndarray:
@@ -602,8 +401,6 @@ def stabilize_video(frames: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> n
 
     print("Phase 1: Stabilizing video...")
     for i in range(num_frames):
-        if i == 268:
-            pass
         # --- Build Transformation Matrix ---
         # 1. Rotation (Inverse of accumulated angle)
         M = cv2.getRotationMatrix2D((center_x, center_y), -current_angle, 1.0)
@@ -632,10 +429,10 @@ def stabilize_video(frames: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> n
     return np.array(stabilized_frames)
 
 
-def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: np.ndarray, k: int) -> np.ndarray:
+def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: np.ndarray, k: int,
+                    stretch_factor: float = 1.0) -> np.ndarray:
     """
-    Phase 2: Stitching without manual stretch factor.
-    Relies on accurate dx values from improved Lucas-Kanade.
+    Phase 2: Stitching with optional stretch factor for difficult videos (e.g. Waterfalls, Low FPS).
     """
     h, w = frames[0].shape[:2]
 
@@ -644,55 +441,44 @@ def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: 
     stab_h, stab_w = stabilized_video[0].shape[:2]
 
     # --- PHASE 2: STITCHING ---
-    # Calculate canvas width based on raw motion (no stretch factor)
-    total_dx = np.sum(np.abs(dx))
-    canvas_w = int(total_dx) + w + 500
+    # Apply stretch factor to total width calculation
+    # We add 'w' again to ensure we have enough buffer
+    total_dx = np.sum(np.abs(dx)) * stretch_factor
+    canvas_w = int(total_dx) + w + 1000
 
     panorama = np.zeros((stab_h, canvas_w, 3), dtype=np.uint8)
     current_x = 0
 
-    # Ideally use the center column to minimize perspective distortion
     prespective_col = np.clip(k, 0, w - 1)
 
-    print(f"Phase 2: Stitching strips from column {k}...")
+    print(f"Phase 2: Stitching strips from col {k} with factor {stretch_factor}...")
 
     for i in range(len(frames) - 1):
         frame = stabilized_video[i]
-
-        # 1. Get raw movement
         move_x = abs(dx[i + 1])
 
-        # 2. SKIP DUPLICATE FRAMES
-        # Even with perfect LK, the video still has duplicate frames where motion is 0.
-        if move_x < 0.5:
+        if move_x < 0.1:  # Threshold for "no motion"
             continue
 
-        # 3. Calculate Strip Width
-        # We rely strictly on the integer rounded value of the detected motion
-        strip_width = int(round(move_x))
+        # Apply stretch factor to the strip width
+        target_width = int(round(move_x * stretch_factor))
 
-        if strip_width <= 0:
+        if target_width <= 0:
             continue
 
-        # 4. Define Boundaries
-        col_end_target = prespective_col + strip_width
-
-        # Safety check: ensure we don't read past the image edge
+        col_end_target = prespective_col + target_width
         col_end_actual = min(col_end_target, stab_w)
-
         actual_width = col_end_actual - prespective_col
 
         if actual_width <= 0:
             continue
 
-        # 5. Paste
         if current_x + actual_width > canvas_w:
             break
 
         strip = frame[:, prespective_col: col_end_actual, :]
         panorama[:, current_x: current_x + actual_width, :] = strip
 
-        # Advance cursor by the actual amount we managed to paste
         current_x += actual_width
 
     # --- FINAL CROP ---
@@ -766,17 +552,8 @@ def main_save_shift(names):
         dx, dy, dtheta = get_video_shifts(read_video(video_path))
         np.savez(f"{name}_shifts.npz", dx=dx, dy=dy, dtheta=dtheta)
 
-
-
-def main_panorams():
-    ks = [50, 100, 150, 200, 250, 300, 350, 400]
-    for file_name in os.listdir("Exercise Inputs"):
-        for k in ks:
-            panorama = create_panorama("Exercise Inputs" + os.sep + file_name, k, f"{file_name}_shifts.npz")
-            show_image(panorama)
-
-
 def main_panorama(file_names: List[str] = None):
+    ks = iguazu_ks
     for file_name in file_names:
         for k in ks:
             panorama = create_panorama("Exercise Inputs" + os.sep + file_name, k, f"{file_name}_shifts.npz")
@@ -790,11 +567,11 @@ house = "House.mp4"
 iguazu = "Iguazu.mp4"
 shinkansen = "Shinkansen.mp4"
 trees = "Trees.mp4"
-boat_ks = [_ for _ in range(50, 420, 5)]
-iguazu_ks = [_ for _ in range(20, 470, 10)]
+iguazu_video_path = f"Exercise Inputs/{iguazu}"
+boat_ks = [_ for _ in range(30, 420, 3)]
+iguazu_ks = [_ for _ in range(160, 490, 3)]
 
 if __name__ == "__main__":
-    video = create_video_animation(iguazu, iguazu_ks, f"{iguazu}_shifts.npz")
-    save_video(video, "iguazu_video.mp4")
-    play_video(video)
+    video = create_video_animation(iguazu, iguazu_ks, "Iguazu.mp4_shifts.npz")
+    save_video(video, "v.mp4")
 
