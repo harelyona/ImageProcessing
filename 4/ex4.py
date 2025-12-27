@@ -9,10 +9,10 @@ from mediapy import read_video, show_video
 from scipy.signal import convolve2d
 from square_video import *
 
-PYRAMID_LEVELS = 6
+PYRAMID_LEVELS = 8
 FILTER_SIZE = 5
 ITERATIONS_PER_LEVEL = 30
-ITERATION_ROTATION = 10
+ITERATION_ROTATION = 2
 
 def show_image(img, save_path=None):
     plt.figure()
@@ -379,36 +379,59 @@ def get_video_shifts(video: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndar
 
 def stabilize_video(frames: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> np.ndarray:
     """
-    Phase 1: Aligns all frames to a common coordinate system (Stabilization).
-    Implements step 2: "Stabilize Rotations & Y translations".
-    Returns a 'tall' video where the horizon is stable.
+    Phase 1: Aligns all frames to the MIDDLE frame's coordinate system.
     """
     h, w = frames[0].shape[:2]
     num_frames = len(frames)
+    mid_idx = num_frames // 2
 
-    # 1. Calculate 'Tall' Canvas Height
-    # We need enough vertical space so frames don't leave the canvas when stabilized.
-    total_dy = int(np.sum(np.abs(dy)))
-    aligned_h = h + total_dy + 200  # generous buffer
+    # 1. Calculate Cumulative Shifts (relative to frame 0)
+    # cumsum gives us the position of every frame relative to the start
+    cumulative_dy = np.cumsum(dy)
+    cumulative_theta = np.cumsum(dtheta)
 
-    center_x, center_y = w // 2, h // 2
+    # 2. Re-center everything to the Middle Frame
+    # By subtracting the middle frame's value, the middle frame becomes 0 (the anchor),
+    # frames before it become negative, and frames after it become positive.
+    abs_dy = cumulative_dy - cumulative_dy[mid_idx]
+    abs_theta = cumulative_theta - cumulative_theta[mid_idx]
 
-    # Start placing frames in the middle of the tall canvas
-    current_y = aligned_h // 2
-    current_angle = 0.0
+    # 3. Calculate Canvas Height
+    # We need room for the max deviation in both directions (up and down)
+    max_y_deviation = int(np.max(np.abs(abs_dy)))
+    aligned_h = h + (2 * max_y_deviation) + 200  # Buffer
+
+    # The middle frame will sit exactly at the center of this new canvas
+    canvas_center_y = aligned_h // 2
+
+    original_center_x, original_center_y = w // 2, h // 2
 
     stabilized_frames = []
 
-    print("Phase 1: Stabilizing video...")
-    for i in range(num_frames):
-        # --- Build Transformation Matrix ---
-        # 1. Rotation (Inverse of accumulated angle)
-        M = cv2.getRotationMatrix2D((center_x, center_y), -current_angle, 1.0)
+    print(f"Phase 1: Stabilizing video (Reference: Frame {mid_idx})...")
 
-        # 2. Vertical Translation (Stabilize Y)
-        # Shift so the image center (h//2) lands at the stabilized Y position (current_y)
-        y_shift = current_y - (h // 2)
-        M[1, 2] += y_shift
+    for i in range(num_frames):
+        # Current deviations relative to the middle frame
+        current_angle = abs_theta[i]
+        current_dy_shift = abs_dy[i]
+
+        # --- Build Transformation Matrix ---
+
+        # 1. Rotation
+        # We rotate by -current_angle to "undo" the rotation relative to the center frame
+        M = cv2.getRotationMatrix2D((original_center_x, original_center_y), -current_angle, 1.0)
+
+        # 2. Vertical Translation
+        # We want the image center (h//2) to land at: CanvasCenter - Deviation
+        # If frame i is "higher" than middle (positive dy), we must shift it DOWN to align.
+        # Note: In images, +y is down. If camera moved DOWN (+dy), image moved UP.
+        # To stabilize, we usually subtract the motion.
+
+        # Calculate target y position for this frame's center
+        target_y = canvas_center_y - int(round(current_dy_shift))
+
+        # The shift needed = Target - Original
+        M[1, 2] += (target_y - original_center_y)
 
         # --- Warp ---
         warped_frame = cv2.warpAffine(
@@ -421,16 +444,11 @@ def stabilize_video(frames: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> n
         )
         stabilized_frames.append(warped_frame)
 
-        # --- Update Accumulators for NEXT frame ---
-        if i < num_frames - 1:
-            current_angle += dtheta[i + 1]
-            current_y -= int(round(dy[i + 1]))
-
     return np.array(stabilized_frames)
 
 
 def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: np.ndarray, k: int,
-                    stretch_factor: float = 1.0) -> np.ndarray:
+                    stretch_factor: float = 1.4) -> np.ndarray:
     """
     Phase 2: Stitching with optional stretch factor for difficult videos (e.g. Waterfalls, Low FPS).
     """
@@ -567,11 +585,12 @@ house = "House.mp4"
 iguazu = "Iguazu.mp4"
 shinkansen = "Shinkansen.mp4"
 trees = "Trees.mp4"
+my_video = "MyVideo.mp4"
 iguazu_video_path = f"Exercise Inputs/{iguazu}"
 boat_ks = [_ for _ in range(30, 420, 3)]
 iguazu_ks = [_ for _ in range(160, 490, 3)]
 
 if __name__ == "__main__":
     for k in [160, 325, 490]:
-        show_image(create_panorama("Exercise Inputs/" + iguazu, k, f"{iguazu}_shifts.npz"), f"panoramas/iguazu_{k}.png")
+         show_image(create_panorama("Exercise Inputs/" + iguazu, k, f"{iguazu}_shifts.npz"), f"panoramas/iguazu_{k}.png")
 
