@@ -572,6 +572,6 @@ boat_ks = [_ for _ in range(30, 420, 3)]
 iguazu_ks = [_ for _ in range(160, 490, 3)]
 
 if __name__ == "__main__":
-    video = create_video_animation(iguazu, iguazu_ks, "Iguazu.mp4_shifts.npz")
-    save_video(video, "v.mp4")
+    for k in [160, 325, 490]:
+        show_image(create_panorama("Exercise Inputs/" + iguazu, k, f"{iguazu}_shifts.npz"), f"panoramas/iguazu_{k}.png")
 
