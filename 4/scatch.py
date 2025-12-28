@@ -132,4 +132,4 @@ def compare_shifts(path, data_path):
     print("=" * 60)
     np.savez("1" + data_path, dx=my_dx, dy=cv2_dy, dtheta=np.zeros(len(my_dx)))
 
-compare_shifts(f"Exercise Inputs/{iguazu}", f"{iguazu}_shifts.npz")
+print(np.load("shifts/MyVideoNormal.mp4_shifts.npz")["dtheta"])

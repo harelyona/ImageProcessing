@@ -408,8 +408,6 @@ def stabilize_video(frames: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> n
 
     stabilized_frames = []
 
-    print(f"Phase 1: Stabilizing video (Reference: Frame {mid_idx})...")
-
     for i in range(num_frames):
         # Current deviations relative to the middle frame
         current_angle = abs_theta[i]
@@ -447,8 +445,7 @@ def stabilize_video(frames: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> n
     return np.array(stabilized_frames)
 
 
-def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: np.ndarray, k: int,
-                    stretch_factor: float = 1.4) -> np.ndarray:
+def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: np.ndarray, k: int) -> np.ndarray:
     """
     Phase 2: Stitching with optional stretch factor for difficult videos (e.g. Waterfalls, Low FPS).
     """
@@ -461,15 +458,13 @@ def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: 
     # --- PHASE 2: STITCHING ---
     # Apply stretch factor to total width calculation
     # We add 'w' again to ensure we have enough buffer
-    total_dx = np.sum(np.abs(dx)) * stretch_factor
+    total_dx = np.sum(np.abs(dx))
     canvas_w = int(total_dx) + w + 1000
 
     panorama = np.zeros((stab_h, canvas_w, 3), dtype=np.uint8)
     current_x = 0
 
     prespective_col = np.clip(k, 0, w - 1)
-
-    print(f"Phase 2: Stitching strips from col {k} with factor {stretch_factor}...")
 
     for i in range(len(frames) - 1):
         frame = stabilized_video[i]
@@ -479,7 +474,7 @@ def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: 
             continue
 
         # Apply stretch factor to the strip width
-        target_width = int(round(move_x * stretch_factor))
+        target_width = int(round(move_x))
 
         if target_width <= 0:
             continue
@@ -499,8 +494,6 @@ def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: 
 
         current_x += actual_width
 
-    # --- FINAL CROP ---
-    print("Cropping...")
     mask = panorama.max(axis=2) > 0
     rows, cols = np.where(mask)
     if len(rows) > 0:
@@ -509,7 +502,7 @@ def strip_stitching(frames: np.ndarray, dx: np.ndarray, dy: np.ndarray, dtheta: 
 
 
 def create_panorama(video_path:str, k:int ,shifts_path:str=None) -> np.ndarray:
-    video = read_video(video_path)[:-1]
+    video = read_video(video_path)
     if shifts_path:
         data = np.load(shifts_path)
         dx, dy, dtheta = data['dx'], data['dy'], data['dtheta']
@@ -520,20 +513,14 @@ def create_panorama(video_path:str, k:int ,shifts_path:str=None) -> np.ndarray:
 
 def create_video_animation(video_path, ks, shifts_path=None):
     panoramas = []
-
-    print("Generating panoramas...")
     # 1. Generate all panoramas first
     for k in ks:
-        print(f"Processing view k={k}...")
         pano = create_panorama("Exercise Inputs" + os.sep + video_path, k, shifts_path)
         panoramas.append(pano)
 
     # 2. Find the minimum common dimensions
     min_h = min(p.shape[0] for p in panoramas)
     min_w = min(p.shape[1] for p in panoramas)
-
-    print(f"Common video size will be: {min_w}x{min_h}")
-
     cropped_panos = []
 
     # 3. Center-Crop all images to the minimum size
@@ -568,13 +555,13 @@ def main_save_shift(names):
     for name in names:
         video_path = os.path.join("Exercise Inputs", name)
         dx, dy, dtheta = get_video_shifts(read_video(video_path))
-        np.savez(f"{name}_shifts.npz", dx=dx, dy=dy, dtheta=dtheta)
+        np.savez(fr"shifts/{name}_shifts.npz", dx=dx, dy=dy, dtheta=dtheta)
 
 def main_panorama(file_names: List[str] = None):
-    ks = iguazu_ks
+    ks = [_ for _ in range(10, 420, 5)]
     for file_name in file_names:
         for k in ks:
-            panorama = create_panorama("Exercise Inputs" + os.sep + file_name, k, f"{file_name}_shifts.npz")
+            panorama = create_panorama("Exercise Inputs" + os.sep + file_name, k, fr"shifts/{file_name}_shifts.npz")
             show_image(panorama)
 
 
@@ -585,12 +572,15 @@ house = "House.mp4"
 iguazu = "Iguazu.mp4"
 shinkansen = "Shinkansen.mp4"
 trees = "Trees.mp4"
-my_video = "MyVideo.mp4"
+my_video = "MyVideoNormal.mp4"
+my_video_zoom = "MyVideoZoom.mp4"
 iguazu_video_path = f"Exercise Inputs/{iguazu}"
 boat_ks = [_ for _ in range(30, 420, 3)]
 iguazu_ks = [_ for _ in range(160, 490, 3)]
-
+my_videos_ks = [_ for _ in range(10, 420, 5)]
 if __name__ == "__main__":
-    for k in [160, 325, 490]:
-         show_image(create_panorama("Exercise Inputs/" + iguazu, k, f"{iguazu}_shifts.npz"), f"panoramas/iguazu_{k}.png")
+    good = create_video_animation(my_video, ks=my_videos_ks, shifts_path=rf"shifts/MyVideoNormal.mp4_shifts.npz")
+    save_video(good, "Example Outputs/good.mp4")
+    bad = create_video_animation(my_video_zoom, ks=my_videos_ks, shifts_path=rf"shifts/MyVideoZoom.mp4_shifts.npz")
+    save_video(bad, "Example Outputs/bad.mp4")
 
