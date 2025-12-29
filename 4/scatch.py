@@ -1,139 +1,157 @@
 from ex4 import *
 
 
-def get_shifts_opencv_robust(video_path):
+def get_shifts_opencv_robust(video_path: str) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Calculates shifts using OpenCV's optimized C++ functions:
-    1. cv2.goodFeaturesToTrack (Finds strong corners)
-    2. cv2.calcOpticalFlowPyrLK (Tracks them)
-    3. cv2.estimateAffinePartial2D (Finds global rotation/translation using RANSAC)
+    Calculates "Ground Truth" shifts using OpenCV's built-in
+    Sparse Lucas-Kanade with outlier rejection (Median).
     """
-    video = read_video(video_path)
-    num_frames = len(video)
+    cap = cv2.VideoCapture(video_path)
+    ret, prev_frame = cap.read()
+    if not ret:
+        return np.array([]), np.array([])
 
-    cv2_dx = []
-    cv2_dy = []
-    cv2_theta = []
+    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
 
-    print("Computing Ground Truth using OpenCV...")
+    # Feature params for Good Features to Track (Strong corners only)
+    feature_params = dict(maxCorners=200, qualityLevel=0.01, minDistance=30, blockSize=3)
 
-    prev_gray = cv2.cvtColor(video[0], cv2.COLOR_RGB2GRAY)
+    # LK params
+    lk_params = dict(winSize=(21, 21), maxLevel=3,
+                     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
 
-    for i in range(1, num_frames):
-        curr_gray = cv2.cvtColor(video[i], cv2.COLOR_RGB2GRAY)
+    # Detect initial points (ignore sky automatically)
+    p0 = cv2.goodFeaturesToTrack(prev_gray, mask=None, **feature_params)
 
-        # 1. Find good features to track in the previous frame
-        p0 = cv2.goodFeaturesToTrack(prev_gray, maxCorners=200, qualityLevel=0.01, minDistance=30)
+    dx_list = []
+    dy_list = []
 
-        if p0 is None:
-            cv2_dx.append(0);
-            cv2_dy.append(0);
-            cv2_theta.append(0)
-            continue
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-        # 2. Run Lucas Kanade (OpenCV Built-in)
-        p1, st, err = cv2.calcOpticalFlowPyrLK(prev_gray, curr_gray, p0, None)
+        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # Select good points (status == 1)
-        good_new = p1[st == 1]
-        good_old = p0[st == 1]
+        # Calculate Optical Flow
+        p1, st, err = cv2.calcOpticalFlowPyrLK(prev_gray, frame_gray, p0, None, **lk_params)
 
-        # 3. Estimate Transformation Matrix (RANSAC handles outliers!)
-        # estimateAffinePartial2D finds best [Rotation, Translation, Scale]
-        # that maps old points to new points.
-        M, inliers = cv2.estimateAffinePartial2D(good_old, good_new)
+        # Select good points
+        if p1 is not None and st is not None:
+            good_new = p1[st == 1]
+            good_old = p0[st == 1]
 
-        if M is None:
-            cv2_dx.append(0);
-            cv2_dy.append(0);
-            cv2_theta.append(0)
+            # Calculate movement for all valid points
+            deltas = good_new - good_old
+
+            # ROBUSTNESS: Take the Median to ignore outliers (moving objects)
+            if len(deltas) > 0:
+                dx = np.median(deltas[:, 0])
+                dy = np.median(deltas[:, 1])
+            else:
+                dx, dy = 0.0, 0.0
+
+            dx_list.append(dx)
+            dy_list.append(dy)
+
+            # Update points for next frame
+            prev_gray = frame_gray.copy()
+            p0 = good_new.reshape(-1, 1, 2)
+
+            # Re-detect points if too few remain
+            if len(p0) < 10:
+                p0 = cv2.goodFeaturesToTrack(prev_gray, mask=None, **feature_params)
         else:
-            # M is [[cos, -sin, tx], [sin, cos, ty]]
-            tx = M[0, 2]
-            ty = M[1, 2]
+            dx_list.append(0.0)
+            dy_list.append(0.0)
+            prev_gray = frame_gray.copy()
+            p0 = cv2.goodFeaturesToTrack(prev_gray, mask=None, **feature_params)
 
-            # Extract angle from rotation matrix components
-            # theta = arctan2(sin, cos)
-            theta_rad = np.arctan2(M[1, 0], M[0, 0])
-            theta_deg = np.degrees(theta_rad)
+    cap.release()
 
-            # Note: OpenCV calculates transform FROM prev TO curr.
-            # Your code seems to calculate how much to shift curr TO match prev.
-            # We usually invert the sign to match "shift" logic, but let's check magnitude first.
-            cv2_dx.append(tx)
-            cv2_dy.append(ty)
-            cv2_theta.append(theta_deg)
-
-        prev_gray = curr_gray
-
-    return np.array(cv2_dx), np.array(cv2_dy)
+    # Pad with 0 at the start to match your array length style (dx[0] is usually 0)
+    return np.array([0] + dx_list), np.array([0] + dy_list)
 
 
-def compare_shifts(path, data_path):
+def compare_shifts(path):
+    print(f"--- Comparing: {path} ---")
+
     # --- 1. Load Data ---
-    data = np.load(data_path)
-    if len(data['dx']) > len(read_video(path)):
-        my_dx = data['dx'][1:]
-    else:
-        my_dx = data['dx']
+    # Unpack your custom results
+    print("Calculating MY shifts...")
+    video = mp.read_video(path)
+    # Note: get_video_shifts returns (dx, dy, theta). We take index 0 (dx) and 1 (dy).
+    my_results = get_video_shifts(video)
+    my_dx = my_results[0]
+    my_dy = my_results[1]
 
+    # Calculate Ground Truth
+    print("Calculating OpenCV shifts...")
     cv2_dx, cv2_dy = get_shifts_opencv_robust(path)
 
+    # Align lengths
     min_len = min(len(my_dx), len(cv2_dx))
-    my_dx = my_dx[:min_len]
-    cv2_dx = cv2_dx[:min_len]
+    # Ignore the very first frame (usually 0) and very last frame (often artifacts)
+    # Testing frames 1 to N-1 is usually most accurate
+    compare_slice = slice(1, min_len - 1)
+
+    my_dx_cut = my_dx[compare_slice]
+    cv2_dx_cut = cv2_dx[compare_slice]
 
     # --- 2. Print Detailed Table (First 10 frames) ---
     print(f"\n{'Frame':<6} | {'My LK':<10} | {'OpenCV':<10} | {'Diff'}")
     print("-" * 45)
-    for i in range(min_len):
-        diff = abs(my_dx[i] - cv2_dx[i])
-        match = "✅" if diff < 1.5 else "❌"
-        print(f"{i:<6} | {my_dx[i]:<10.2f} | {cv2_dx[i]:<10.2f} | {diff:<5.2f} {match}")
+    for i in range(min(15, len(my_dx_cut))):
+        diff = abs(my_dx_cut[i] - cv2_dx_cut[i])
+        match = "✅" if diff < 1.0 else "❌"  # Stricter 1.0 pixel tolerance
+        print(f"{i + 1:<6} | {my_dx_cut[i]:<10.2f} | {cv2_dx_cut[i]:<10.2f} | {diff:<5.2f} {match}")
     print("...")
 
     # --- 3. CALCULATE METRICS ---
-    # RMSE: Lower is better (0 is perfect)
-    rmse = np.sqrt(np.mean((my_dx - cv2_dx) ** 2))
+    # RMSE
+    rmse = np.sqrt(np.mean((my_dx_cut - cv2_dx_cut) ** 2))
 
-    # Correlation: Higher is better (1.0 is perfect)
-    if np.std(my_dx) > 1e-5 and np.std(cv2_dx) > 1e-5:
-        correlation = np.corrcoef(my_dx, cv2_dx)[0, 1]
+    # Correlation
+    if np.std(my_dx_cut) > 1e-5 and np.std(cv2_dx_cut) > 1e-5:
+        correlation = np.corrcoef(my_dx_cut, cv2_dx_cut)[0, 1]
     else:
         correlation = 0.0
 
-    # Success Rate (Tolerance: 2 pixels)
-    success_count = np.sum(np.abs(my_dx - cv2_dx) < 2.0)
-    success_rate = (success_count / min_len) * 100
+    # Success Rate (Tolerance: 1.0 pixel)
+    success_count = np.sum(np.abs(my_dx_cut - cv2_dx_cut) < 1.0)
+    success_rate = (success_count / len(my_dx_cut)) * 100
 
     # --- 4. PRINT FINAL SCORE ---
     print("\n" + "=" * 60)
     print("📊  COMPARISON QUALITY METRICS")
     print("=" * 60)
+    print(f"Video: {path}")
 
-    print(f"1. Success Rate (Tolerance < 2px):  {success_rate:.1f}%")
-    print(f"   (Percentage of frames considered accurate)")
+    print(f"1. Success Rate (Diff < 1px):       {success_rate:.1f}%")
 
     print(f"2. Pearson Correlation:             {correlation:.4f}  (Target: > 0.9)")
-    print(f"   (Measures trend similarity. 1.0 = Perfect trend match)")
 
-    print(f"3. RMSE (Root Mean Square Error):   {rmse:.3f} px   (Target: < 2.0)")
-    print(f"   (Average error magnitude. Lower is better)")
+    print(f"3. RMSE (Root Mean Square Error):   {rmse:.3f} px   (Target: < 1.0)")
 
     print("-" * 60)
 
     # Final Verdict
-    if correlation > 0.9 and rmse < 2.0:
-        print("🏆  FINAL VERDICT: EXCELLENT Match (High accuracy)")
-    elif correlation > 0.7:
-        print("✅  FINAL VERDICT: GOOD Match (Valid algorithm, slight noise)")
+    if correlation > 0.95 and rmse < 1.0:
+        print("🏆  FINAL VERDICT: EXCELLENT Match (Professional Grade)")
+    elif correlation > 0.85 and rmse < 2.0:
+        print("✅  FINAL VERDICT: GOOD Match (Valid for Assignment)")
+    elif correlation > 0.6:
+        print("⚠️  FINAL VERDICT: OKAY Match (Roughly follows trend)")
     else:
-        print("⚠️  FINAL VERDICT: POOR Match (Check for bugs or 'Aperture Problem')")
-    print("=" * 60)
+        print("❌  FINAL VERDICT: POOR Match (Algorithm divergent)")
+    print("=" * 60 + "\n")
 
-video = iguazu
-# compare_shifts(fr"Exercise Inputs/{video}", fr"shifts/{video}_shifts.npz")
-a = np.zeros(15)
-b = np.array([1, 2])
-a[:] = b
-print(a)
+
+if __name__ == "__main__":
+    # Ensure paths are correct
+    boat_path = os.path.join("Exercise Inputs", "boat.mp4")
+    kessaria_path = os.path.join("Exercise Inputs", "Kessaria.mp4")  # The hard one (sky)
+
+    # Compare
+    compare_shifts(boat_path)
+    compare_shifts(kessaria_path)
