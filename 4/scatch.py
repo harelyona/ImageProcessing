@@ -86,7 +86,7 @@ def compare_shifts(path, data_path):
     # --- 2. Print Detailed Table (First 10 frames) ---
     print(f"\n{'Frame':<6} | {'My LK':<10} | {'OpenCV':<10} | {'Diff'}")
     print("-" * 45)
-    for i in range(min(10, min_len)):
+    for i in range(min_len):
         diff = abs(my_dx[i] - cv2_dx[i])
         match = "✅" if diff < 1.5 else "❌"
         print(f"{i:<6} | {my_dx[i]:<10.2f} | {cv2_dx[i]:<10.2f} | {diff:<5.2f} {match}")
@@ -130,6 +130,10 @@ def compare_shifts(path, data_path):
     else:
         print("⚠️  FINAL VERDICT: POOR Match (Check for bugs or 'Aperture Problem')")
     print("=" * 60)
-    np.savez("1" + data_path, dx=my_dx, dy=cv2_dy, dtheta=np.zeros(len(my_dx)))
 
-print(np.load("shifts/MyVideoNormal.mp4_shifts.npz")["dtheta"])
+video = iguazu
+# compare_shifts(fr"Exercise Inputs/{video}", fr"shifts/{video}_shifts.npz")
+a = np.zeros(15)
+b = np.array([1, 2])
+a[:] = b
+print(a)

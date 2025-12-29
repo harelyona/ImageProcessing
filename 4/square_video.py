@@ -178,21 +178,24 @@ def play_video(video_ndarray: np.ndarray) -> None:
 def save_video(video: np.ndarray, filename: str) -> None:
     """
     Saves a list of frames (or numpy array) to an MP4 file.
+    Automatically converts RGB frames to BGR for OpenCV.
     """
     if len(video) == 0:
         return
 
-    # Get dimensions from the first frame
-    # Note: numpy shape is (height, width, channels), but OpenCV expects (width, height)
+    # Get dimensions
     height, width, _ = video[0].shape
     size = (width, height)
 
-    # Define the codec (mp4v is standard for .mp4)
+    # Define the codec
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    # Make sure FPS is defined globally or pass it as an argument
     out = cv2.VideoWriter(filename, fourcc, FPS, size)
 
     for frame in video:
-        out.write(frame)
+        # FIX: Convert the frame from RGB to BGR before writing
+        bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        out.write(bgr_frame)
 
     out.release()
     print(f"Saved video to: {filename}")

@@ -1,18 +1,12 @@
-import os
 from typing import Tuple, Any, List
-import numpy as np
-import cv2
 from matplotlib import pyplot as plt
-from numpy import floating, complexfloating, timedelta64
-from openpyxl.styles.alignment import horizontal_alignments
 from mediapy import read_video, show_video
 from scipy.signal import convolve2d
 from square_video import *
 
-PYRAMID_LEVELS = 8
-FILTER_SIZE = 5
-ITERATIONS_PER_LEVEL = 30
-ITERATION_ROTATION = 2
+FILTER_SIZE = 3
+PYRAMID_LEVELS = 7
+ITERATIONS_PER_LEVEL = 15
 
 def show_image(img, save_path=None):
     plt.figure()
@@ -27,19 +21,6 @@ def unite_pyramid_channels(ch1, ch2, ch3):
     for l1, l2, l3 in zip(ch1, ch2, ch3):
         united_pyr.append(np.dstack((l1, l2, l3)))
     return united_pyr
-
-
-def build_gaussian_pyramid(im, max_levels, filter_size):
-    # Normalize if needed
-    if im.max() > 1.0 or im.dtype == np.uint8:
-        im = im.astype(float) / 255.0
-
-    if im.ndim == 2:
-        return build_single_channel_gaussian_pyramid(im, max_levels, filter_size)
-    ch1_pyr = build_single_channel_gaussian_pyramid(im[:, :, 0], max_levels, filter_size)
-    ch2_pyr = build_single_channel_gaussian_pyramid(im[:, :, 1], max_levels, filter_size)
-    ch3_pyr = build_single_channel_gaussian_pyramid(im[:, :, 2], max_levels, filter_size)
-    return unite_pyramid_channels(ch1_pyr, ch2_pyr, ch3_pyr)
 
 def generate_gaussian_kernel(kernel_size):
     if kernel_size == 1: return np.array([[1]])
@@ -130,27 +111,6 @@ def build_laplacian_pyramid(image, max_levels, filter_size):
 
     return unite_pyramid_channels(ch1_pyr, ch2_pyr, ch3_pyr)
 
-
-def image_blending(im1, im2, mask, max_levels, filter_size):
-    # 1. Build Laplacian pyramids (Raw floats)
-    L1 = build_laplacian_pyramid(im1, max_levels, filter_size)
-    L2 = build_laplacian_pyramid(im2, max_levels, filter_size)
-
-    # 2. Build Gaussian pyramid for mask
-    Gm = build_gaussian_pyramid(mask, max_levels, filter_size)
-
-    blended_pyr = []
-    for l1, l2, gm in zip(L1, L2, Gm):
-        # Handle broadcasting if mask is 2D and images are 3D
-        if gm.ndim == 2 and l1.ndim == 3:
-            gm = gm[:, :, np.newaxis]
-
-        blended_level = gm * l1 + (1 - gm) * l2
-        blended_pyr.append(blended_level)
-
-    im_blended = reconstruct_from_laplacian_pyramid(blended_pyr, filter_size)
-    return np.clip(im_blended, 0, 1)
-
 def lk_prep_image(im):
     if im.ndim == 3:
         im = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
@@ -162,79 +122,27 @@ def lk_prep_image(im):
     return im
 
 
-def lk_for_x_y(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[int, int]:
+def lucas_kanade(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[float, float, float]:
     """
-    Computes the global translation (u, v) from frame1 to frame2.
-    Returns INTEGER shifts (rounded from sub-pixel accuracy).
+    Simultaneous Pyramidal Lucas-Kanade for Translation (u, v) and Rotation (theta).
+    Solves a 3x3 system [du, dv, dtheta] at each iteration.
     """
+    # 1. Prep Images
     I1 = lk_prep_image(frame1)
     I2 = lk_prep_image(frame2)
 
-    pyr1 = build_gaussian_pyramid(I1, PYRAMID_LEVELS, FILTER_SIZE)
-    pyr2 = build_gaussian_pyramid(I2, PYRAMID_LEVELS, FILTER_SIZE)
+    # 2. Light Blur
+    I1 = cv2.GaussianBlur(I1, (3, 3), 0)
+    I2 = cv2.GaussianBlur(I2, (3, 3), 0)
 
-    u, v = 0.0, 0.0
+    # 3. Build Pyramids
+    pyr1 = build_single_channel_gaussian_pyramid(I1, PYRAMID_LEVELS, FILTER_SIZE)
+    pyr2 = build_single_channel_gaussian_pyramid(I2, PYRAMID_LEVELS, FILTER_SIZE)
 
-    # Coarse-to-fine iterative refinement
-    for level in range(len(pyr1) - 1, -1, -1):
-        u *= 2
-        v *= 2
-
-        im1_lvl = pyr1[level]
-        im2_lvl = pyr2[level]
-        h, w = im1_lvl.shape
-
-        for _ in range(ITERATIONS_PER_LEVEL):
-            # Warp Image 1 using current estimate
-            M = np.float32([[1, 0, -u], [0, 1, -v]])
-            im1_warp = cv2.warpAffine(im1_lvl, M, (w, h), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
-
-            # Compute Gradients on the WARPED image
-            Ix = cv2.Sobel(im1_warp, cv2.CV_64F, 1, 0, ksize=3)
-            Iy = cv2.Sobel(im1_warp, cv2.CV_64F, 0, 1, ksize=3)
-            It = im1_warp - im2_lvl
-
-            # Linear System A * d = b
-            Ixx = np.sum(Ix * Ix)
-            Iyy = np.sum(Iy * Iy)
-            Ixy = np.sum(Ix * Iy)
-            Ixt = np.sum(Ix * It)
-            Iyt = np.sum(Iy * It)
-
-            A = np.array([[Ixx, Ixy], [Ixy, Iyy]])
-            b = np.array([[Ixt], [Iyt]])
-
-            try:
-                delta = np.linalg.pinv(A) @ b
-                du, dv = delta.flatten()
-                u += du
-                v += dv
-
-                if np.abs(du) < 1e-5 and np.abs(dv) < 1e-5:
-                    break
-            except np.linalg.LinAlgError:
-                break
-
-    return int(round(u)), int(round(v))
-
-
-def find_rotation_angle(I1: np.ndarray, I2: np.ndarray) -> int:
-    """
-    Estimates the rotation angle (theta) from I1 to I2.
-    Uses a Pyramid and Joint Solver (u, v, theta) to robustly distinguish
-    true rotation from large translations.
-    """
-
-    # Build Pyramids
-    pyr1 = build_gaussian_pyramid(I1, PYRAMID_LEVELS, FILTER_SIZE)
-    pyr2 = build_gaussian_pyramid(I2, PYRAMID_LEVELS, FILTER_SIZE)
-
-    # State: u, v, theta
     u, v, theta = 0.0, 0.0, 0.0
 
-    # Coarse-to-fine loop
+    # 4. Coarse-to-Fine Loop
     for level in range(len(pyr1) - 1, -1, -1):
-        # Scale up translation (theta is scale-invariant)
         u *= 2
         v *= 2
 
@@ -243,40 +151,34 @@ def find_rotation_angle(I1: np.ndarray, I2: np.ndarray) -> int:
         h, w = im1_lvl.shape
         cy, cx = h / 2.0, w / 2.0
 
-        # Grid for rotation derivatives (Centered)
         y_grid, x_grid = np.mgrid[0:h, 0:w]
         x_grid = x_grid.astype(np.float32) - cx
         y_grid = y_grid.astype(np.float32) - cy
 
-        for _ in range(ITERATION_ROTATION):
-            # 1. Construct Matrix (Rotate then Translate)
-            M = cv2.getRotationMatrix2D((cx, cy), theta, 1.0)
+        for _ in range(ITERATIONS_PER_LEVEL):
+            # --- A. Warp I1 towards I2 ---
+            # FIX 1: Subtract u and v to shift image in the correct direction
+            M = cv2.getRotationMatrix2D((cx, cy), -theta, 1.0)
             M[0, 2] -= u
             M[1, 2] -= v
 
-            # 2. Warp I1 towards I2 using Inverse Map
             im1_warp = cv2.warpAffine(
                 im1_lvl, M, (w, h),
-                flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=0
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REFLECT
             )
 
-            # 3. Error & Gradients
-            It = im1_warp - im2_lvl
+            # --- B. Compute Error and Gradients ---
+            It = im2_lvl - im1_warp
 
-            # Gradients on Warped Image
-            Ix = cv2.Sobel(im1_warp, cv2.CV_64F, 1, 0, ksize=3) / 8.0
-            Iy = cv2.Sobel(im1_warp, cv2.CV_64F, 0, 1, ksize=3) / 8.0
+            Ix = cv2.Sobel(im1_warp, cv2.CV_64F, 1, 0, ksize=3)
+            Iy = cv2.Sobel(im1_warp, cv2.CV_64F, 0, 1, ksize=3)
 
-            # 4. Jacobians
-            # J_u = -Ix, J_v = -Iy
-            # J_theta (Calculated) = x*Iy - y*Ix
-            # Theoretical Deriv dI/dTh = y*Ix - x*Iy
-            # So J_theta here is effectively -dI/dTh (Negative Derivative)
-            J_theta = (x_grid * Iy - y_grid * Ix) * (np.pi / 180.0)
+            # FIX 2: Swap terms for Y-Down coordinate system
+            # J_theta = y*Ix - x*Iy
+            J_theta = (y_grid * Ix - x_grid * Iy) * (np.pi / 180.0)
 
-            # 5. Build System
+            # --- D. Build 3x3 System ---
             Ix_f = Ix.flatten()
             Iy_f = Iy.flatten()
             Jth_f = J_theta.flatten()
@@ -295,71 +197,27 @@ def find_rotation_angle(I1: np.ndarray, I2: np.ndarray) -> int:
                 [Ixt, Iyt, Itt]
             ])
 
-            # b Calculation
-            # We need b = - (Jacobian * Error)
-            # b_u = - sum(-Ix * It) = sum(Ix * It)
-            # b_v = - sum(-Iy * It) = sum(Iy * It)
-            # b_th = - sum(J_theta * It)  <-- Wait!
-            # Since J_theta is ALREADY negative derivative,
-            # - (J_theta * It) would be Positive Gradient. We want Negative Gradient.
-            # So we strictly want: b_th = sum(J_theta * It)
-
             b = np.array([
                 np.dot(Ix_f, It_f),
                 np.dot(Iy_f, It_f),
-                np.dot(Jth_f, It_f)  # [CORRECTION] Removed the negative sign here
+                np.dot(Jth_f, It_f)
             ])
 
+            # --- E. Solve and Update ---
             try:
-                # Use pinv for stability on featureless images (like the square)
                 delta = np.linalg.pinv(A) @ b
                 du, dv, dtheta = delta
 
-                # Additive Update
                 u += du
                 v += dv
                 theta += dtheta
 
-                if abs(du) < 1e-3 and abs(dv) < 1e-3 and abs(dtheta) < 1e-3:
+                if abs(du) < 1e-4 and abs(dv) < 1e-4 and abs(dtheta) < 1e-4:
                     break
             except np.linalg.LinAlgError:
                 break
 
-    # Return only the rotation component
-    return -int(round(theta))
-
-
-def lucas_kanade(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[int, int, int]:
-    """
-    1. Finds rotation theta using a pyramid (robust to large shifts).
-    2. Rotates frame2 by -theta to align with frame1.
-    3. Uses lk_for_x_y to find translation (u, v).
-    """
-    I1 = lk_prep_image(frame1)
-    I2 = lk_prep_image(frame2)
-
-    # Step 1: Find Rotation Angle
-    theta = find_rotation_angle(I1, I2)
-
-    # Step 2: Compensate for Rotation
-    h, w = I1.shape
-    cx, cy = w / 2.0, h / 2.0
-
-    # Rotate frame2 by -theta to cancel out the detected rotation
-    M_fix = cv2.getRotationMatrix2D((cx, cy), -theta, 1.0)
-
-    # Use standard forward warp to apply the fix
-    I2_aligned = cv2.warpAffine(
-        I2, M_fix, (w, h),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0
-    )
-
-    # Step 3: Find Translation
-    u, v = lk_for_x_y(I1, I2_aligned)
-
-    return int(u), int(v), int(round(theta))
+    return -u, -v, -theta
 
 def get_video_shifts(video: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -426,7 +284,7 @@ def stabilize_video(frames: np.ndarray, dy: np.ndarray, dtheta: np.ndarray) -> n
         # To stabilize, we usually subtract the motion.
 
         # Calculate target y position for this frame's center
-        target_y = canvas_center_y - int(round(current_dy_shift))
+        target_y = canvas_center_y - current_dy_shift
 
         # The shift needed = Target - Original
         M[1, 2] += (target_y - original_center_y)
@@ -511,10 +369,11 @@ def create_panorama(video_path:str, k:int ,shifts_path:str=None) -> np.ndarray:
     return strip_stitching(video, dx, dy, dtheta, k)
 
 
-def create_video_animation(video_path, ks, shifts_path=None):
+def create_video_animation(video_path, ks, shifts_path=None) -> np.ndarray:
     panoramas = []
     # 1. Generate all panoramas first
     for k in ks:
+        print("creating panorama for k={}".format(k))
         pano = create_panorama("Exercise Inputs" + os.sep + video_path, k, shifts_path)
         panoramas.append(pano)
 
@@ -543,26 +402,23 @@ def create_video_animation(video_path, ks, shifts_path=None):
     show_video(video_array, fps=2)
     return video_array
 
-def main_save_shifts():
-    paths = os.listdir("Exercise Inputs")
-    for path in paths:
-        if f"{path}_shifts.npz" not in os.listdir():
-            video_path = os.path.join("Exercise Inputs", path)
-            dx, dy, dtheta = get_video_shifts(read_video(video_path))
-            np.savez(f"{path}_shifts.npz", dx=dx, dy=dy, dtheta=dtheta)
-
-def main_save_shift(names):
+def main_save_shifts(names):
     for name in names:
         video_path = os.path.join("Exercise Inputs", name)
         dx, dy, dtheta = get_video_shifts(read_video(video_path))
         np.savez(fr"shifts/{name}_shifts.npz", dx=dx, dy=dy, dtheta=dtheta)
 
 def main_panorama(file_names: List[str] = None):
-    ks = [_ for _ in range(10, 420, 5)]
+    ks = [_ for _ in range(0, 420, 50)]
     for file_name in file_names:
         for k in ks:
             panorama = create_panorama("Exercise Inputs" + os.sep + file_name, k, fr"shifts/{file_name}_shifts.npz")
             show_image(panorama)
+
+def main_create_video(file_name: str, ks: List[float]) -> None:
+
+    result_video = create_video_animation(file_name, ks, f"shifts/{file_name}_shifts.npz")
+    save_video(result_video, f"video outputs/{file_name}.mp4")
 
 
 kessaria = "Kessaria.mp4"
@@ -575,12 +431,10 @@ trees = "Trees.mp4"
 my_video = "MyVideoNormal.mp4"
 my_video_zoom = "MyVideoZoom.mp4"
 iguazu_video_path = f"Exercise Inputs/{iguazu}"
+boat_data_path = "shifts/boat.mp4_shifts.npz"
+all_videos = [kessaria, boat, garden, house, iguazu, shinkansen, trees, my_video, my_video_zoom]
 boat_ks = [_ for _ in range(30, 420, 3)]
-iguazu_ks = [_ for _ in range(160, 490, 3)]
+iguazu_ks = [_ for _ in range(160, 490, 10)]
 my_videos_ks = [_ for _ in range(10, 420, 5)]
 if __name__ == "__main__":
-    good = create_video_animation(my_video, ks=my_videos_ks, shifts_path=rf"shifts/MyVideoNormal.mp4_shifts.npz")
-    save_video(good, "Example Outputs/good.mp4")
-    bad = create_video_animation(my_video_zoom, ks=my_videos_ks, shifts_path=rf"shifts/MyVideoZoom.mp4_shifts.npz")
-    save_video(bad, "Example Outputs/bad.mp4")
-
+    main_panorama([kessaria])
