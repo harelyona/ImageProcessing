@@ -1,3 +1,4 @@
+import glob
 import time
 from typing import Tuple, List
 from matplotlib import pyplot as plt
@@ -6,6 +7,7 @@ from square_video import *
 import cv2
 import numpy as np
 import os
+from PIL import Image
 
 BLUR_FILTER_SIZE = 5
 PYRAMID_LEVELS = 5
@@ -32,8 +34,11 @@ def build_single_channel_gaussian_pyramid(im, max_levels):
     current_im = im
     for _ in range(max_levels - 1):
         downsampled_im = cv2.pyrDown(current_im)
-        if downsampled_im.shape[0] < 2 or downsampled_im.shape[1] < 2:
+
+        # Stop if height or width goes below 30
+        if downsampled_im.shape[0] < 30 or downsampled_im.shape[1] < 30:
             break
+
         pyr.append(downsampled_im)
         current_im = downsampled_im
     return pyr
@@ -85,8 +90,6 @@ def lk_solve(Ix: np.ndarray, Iy: np.ndarray, It: np.ndarray,
              x_grid: np.ndarray, y_grid: np.ndarray) -> Tuple[float, float, float]:
     h, w = Ix.shape
     J_theta = (y_grid * Ix - x_grid * Iy) * (np.pi / 180.0)
-
-    # Margin 15%
     margin_y = int(h * 0.15)
     margin_x = int(w * 0.15)
 
@@ -133,11 +136,14 @@ def lucas_kanade(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[float, float, 
     # Double Blur
     I1 = cv2.GaussianBlur(I1, (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE), 0)
     I1 = cv2.GaussianBlur(I1, (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE), 0)
+    I1 = cv2.GaussianBlur(I1, (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE), 0)
+    I2 = cv2.GaussianBlur(I2, (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE), 0)
     I2 = cv2.GaussianBlur(I2, (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE), 0)
     I2 = cv2.GaussianBlur(I2, (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE), 0)
 
     pyr1 = build_single_channel_gaussian_pyramid(I1, PYRAMID_LEVELS)
     pyr2 = build_single_channel_gaussian_pyramid(I2, PYRAMID_LEVELS)
+
 
     u, v, theta = 0.0, 0.0, 0.0
 
@@ -259,27 +265,16 @@ def stitch_stabilized_video(stabilized_frames: np.ndarray, dx: np.ndarray, k: in
     return panorama
 
 
-def create_video_animation(video_name: str, ks: List[int]) -> np.ndarray:
+def create_video_animation(video: np.ndarray, ks: List[int]) -> np.ndarray:
     """
     Optimized Animation Generator with Timing.
     """
-    total_start = time.time()
-
-    # 1. Load
-    video_path = os.path.join("Exercise Inputs", video_name)
-    print(f"Loading {video_name}...")
-    t0 = time.time()
-    video = read_video(video_path)
-    print(f" -> Loading took {time.time() - t0:.2f}s")
-
-    # 2. Compute Shifts
-    print(f"Calculating shifts for {video_name}...")
     t0 = time.time()
     dx, dy, dtheta = get_video_shifts(video)
     print(f" -> Shift calculation took {time.time() - t0:.2f}s")
 
     # 3. Stabilize Video
-    print(f"Stabilizing {video_name}...")
+    print(f"Stabilizing...")
     t0 = time.time()
     stabilized_video = stabilize_video(video, dy, dtheta)
     print(f" -> Stabilization took {time.time() - t0:.2f}s")
@@ -317,10 +312,6 @@ def create_video_animation(video_name: str, ks: List[int]) -> np.ndarray:
     print(f" -> Cropping and Stacking took {time.time() - t0:.2f}s")
 
     show_video(video_array, fps=2)
-
-    total_time = time.time() - total_start
-    print(f"=== Total process for {video_name} took {total_time:.2f}s ===")
-
     return video_array
 
 
@@ -336,8 +327,56 @@ def save_video(video: np.ndarray, filename: str) -> None:
 
 def main_create_video(file_names: List[str], ks: List[int]) -> None:
     for file_name in file_names:
-        result_video = create_video_animation(file_name, ks)
+        video = mp.read_video("Exercise Inputs/" + file_name)
+        video = video[::-1]
+        result_video = create_video_animation(video, ks)
         save_video(result_video, f"video outputs/{file_name}")
+
+
+def generate_panorama(input_frames_path, n_out_frames):
+    """
+    Main entry point for ex4
+    :param input_frames_path : path to a dir with input video frames.
+    :param n_out_frames: number of generated panorama frames
+    :return: A list of generated panorama frames (of size n_out_frames),
+    each list item should be a PIL image of a generated panorama.
+    """
+    total_start = time.time()
+    # 1. Load Frames
+    search_path = os.path.join(input_frames_path, "*.jpg")
+    frame_files = sorted(glob.glob(search_path))
+
+    frames = []
+    for f in frame_files:
+        img_bgr = cv2.imread(f)
+        if img_bgr is not None:
+            # Convert BGR to RGB
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            frames.append(img_rgb)
+    frames = np.array(frames)
+
+    # 2. Define K values (Viewpoints)
+    h, w = frames[0].shape[:2]
+
+    # We define a margin to avoid the empty black borders from stabilization.
+    # 5% of the width is usually a safe safe-zone.
+    margin = int(w * 0.1)
+
+    k_start = margin
+    k_end = w - margin
+
+    # Generate exactly n_out_frames integers evenly spaced between start and end
+    ks = np.linspace(k_start, k_end, n_out_frames).astype(int).tolist()
+
+    # 3. Create Animation (Using your existing function, assumed to accept 'frames')
+    # Returns numpy array of shape (N, H, W, 3)
+    video_array = create_video_animation(frames, ks)
+
+    # 4. Convert to List of PIL Images
+    pil_panoramas = [Image.fromarray(frame) for frame in video_array]
+    total_time = time.time() - total_start
+    print(f"=== Total process for took {total_time:.2f}s ===")
+    return pil_panoramas
 
 
 kessaria = "Kessaria.mp4"
@@ -356,5 +395,4 @@ boat_ks = [_ for _ in range(30, 420, 20)]
 iguazu_ks = [_ for _ in range(160, 490, 10)]
 my_videos_ks = [_ for _ in range(10, 420, 5)]
 if __name__ == "__main__":
-    main_create_video(all_videos, boat_ks)
-
+    generate_panorama(r"video outputs\video_frames", 15)
