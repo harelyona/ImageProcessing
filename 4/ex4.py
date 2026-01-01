@@ -374,22 +374,22 @@ def generate_panorama(input_frames_path, n_out_frames):
     return pil_panoramas
 
 
-kessaria = "Kessaria.mp4"
-boat = "boat.mp4"
-garden = "Garden.mp4"
-house = "House.mp4"
-iguazu = "Iguazu.mp4"
-shinkansen = "Shinkansen.mp4"
-trees = "Trees.mp4"
-my_video = "MyVideoNormal.mp4"
-my_video_zoom = "MyVideoZoom.mp4"
-iguazu_video_path = f"Exercise Inputs/{iguazu}"
-boat_data_path = "shifts/boat.mp4_shifts.npz"
-all_videos = [kessaria, boat, garden, house, iguazu, shinkansen, trees, my_video, my_video_zoom]
-boat_ks = [_ for _ in range(30, 420, 20)]
-iguazu_ks = [_ for _ in range(160, 490, 10)]
-my_videos_ks = [_ for _ in range(10, 420, 5)]
+# kessaria = "Kessaria.mp4"
+# boat = "boat.mp4"
+# garden = "Garden.mp4"
+# house = "House.mp4"
+# iguazu = "Iguazu.mp4"
+# shinkansen = "Shinkansen.mp4"
+# trees = "Trees.mp4"
+# my_video = "MyVideoNormal.mp4"
+# my_video_zoom = "MyVideoZoom.mp4"
+# iguazu_video_path = f"Exercise Inputs/{iguazu}"
+# boat_data_path = "shifts/boat.mp4_shifts.npz"
+# all_videos = [kessaria, boat, garden, house, iguazu, shinkansen, trees, my_video, my_video_zoom]
+# boat_ks = [_ for _ in range(30, 420, 20)]
+# iguazu_ks = [_ for _ in range(160, 490, 10)]
+# my_videos_ks = [_ for _ in range(10, 420, 5)]
 
 
 
-main_create_video([kessaria, shinkansen], boat_ks)
+# main_create_video([kessaria, shinkansen], boat_ks)
