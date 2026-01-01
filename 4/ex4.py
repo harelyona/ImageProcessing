@@ -85,19 +85,30 @@ def lk_gradients(warped_im: np.ndarray, target_im: np.ndarray) -> Tuple[np.ndarr
 
 
 def lk_solve(Ix: np.ndarray, Iy: np.ndarray, It: np.ndarray,
-             x_grid: np.ndarray, y_grid: np.ndarray) -> Tuple[float, float, float]:
+             x_grid: np.ndarray, y_grid: np.ndarray, margin_percent: float = 0.17) -> Tuple[float, float, float]:
+    """
+    Solves the Lucas-Kanade optical flow equations.
+    Ignores pixels within margin_percent from the top and bottom.
+    """
     h, w = Ix.shape
     J_theta = (y_grid * Ix - x_grid * Iy) * (np.pi / 180.0)
-    margin_y = int(h * 0.15)
-    margin_x = int(w * 0.15)
 
+    # Calculate margin in pixels based on percentage
+    margin_y = int(h * margin_percent)
+
+    # Keep a small x margin to avoid border artifacts, but focusing mainly on y for parallax
+    margin_x = int(w * 0.02)  # Small 2% margin on sides
+
+    # Ensure image is large enough to slice
     if margin_y > 0 and margin_x > 0 and (h - 2 * margin_y) > 2 and (w - 2 * margin_x) > 2:
         sl_y = slice(margin_y, -margin_y)
         sl_x = slice(margin_x, -margin_x)
     else:
+        # Fallback for very small pyramid levels
         sl_y = slice(None)
         sl_x = slice(None)
 
+    # Slice arrays to ignore top/bottom margins
     Ix_f = Ix[sl_y, sl_x].flatten()
     Iy_f = Iy[sl_y, sl_x].flatten()
     Jth_f = J_theta[sl_y, sl_x].flatten()
@@ -169,7 +180,8 @@ def lucas_kanade(frame1: np.ndarray, frame2: np.ndarray) -> Tuple[float, float, 
             Ix, Iy, It = lk_gradients(im1_warp, im2_lvl)
 
             # Note: Ensure lk_solve has the negative sign fix!
-            du, dv, dtheta = lk_solve(Ix, Iy, It, x_grid, y_grid)
+            # We pass margin_percent=0.15 to ignore top/bottom 15%
+            du, dv, dtheta = lk_solve(Ix, Iy, It, x_grid, y_grid, margin_percent=0.15)
 
             u += du
             v += dv
@@ -287,8 +299,6 @@ def create_video_animation(video: np.ndarray, ks: List[int]) -> np.ndarray:
     for k in ks:
         pano = stitch_stabilized_video(stabilized_video, dx, k)
         panoramas.append(pano)
-    if not panoramas:
-        return np.array([])
 
     min_h = min(p.shape[0] for p in panoramas)
     min_w = min(p.shape[1] for p in panoramas)
@@ -381,4 +391,5 @@ iguazu_ks = [_ for _ in range(160, 490, 10)]
 my_videos_ks = [_ for _ in range(10, 420, 5)]
 
 
-#main_create_video([kessaria], boat_ks)
+
+main_create_video([kessaria, shinkansen], boat_ks)
