@@ -260,7 +260,7 @@ def stitch_stabilized_video(stabilized_frames: np.ndarray, dx: np.ndarray, k: in
     panorama = np.zeros((stab_h, canvas_w, 3), dtype=np.uint8)
 
     current_x = 0
-    prespective_col = np.clip(k, 0, stab_w - 1)
+    prespective_col = int(np.clip(k, 0, stab_w - 1))
 
     for i in range(len(stabilized_frames) - 1):
         frame = stabilized_frames[i]
@@ -389,7 +389,10 @@ def generate_panorama(input_frames_path, n_out_frames):
 # boat_ks = [_ for _ in range(30, 420, 20)]
 # iguazu_ks = [_ for _ in range(160, 490, 10)]
 # my_videos_ks = [_ for _ in range(10, 420, 5)]
-
-
-
-# main_create_video([kessaria, shinkansen], boat_ks)
+#
+#
+#
+# main_create_video([boat, my_video, my_video_zoom], np.linspace(30, 400, 10))
+# frames = generate_panorama("video outputs/video_frames", 10)
+# for frame in frames:
+#     show_image(frame)
